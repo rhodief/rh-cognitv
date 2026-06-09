@@ -7,7 +7,7 @@
 
 ## 1. Overview
 
-We are building the **first functional layer** of `rh_cognitiv` — a brand-new framework starting from scratch. The package structure exists (`pyproject.toml`, dependencies) but there is **no code yet**. These execution nodes are the **foundation** of the entire system, providing first-class support for:
+We are building the **first functional layer** of `rh_cognitv` — a brand-new framework starting from scratch. The package structure exists (`pyproject.toml`, dependencies) but there is **no code yet**. These execution nodes are the **foundation** of the entire system, providing first-class support for:
 
 | Node | Purpose |
 |------|---------|
@@ -31,7 +31,7 @@ These nodes are the **foundation for the agentic ecosystem** to be built afterwa
 ## 2. Architecture
 
 ```
-rh_cognitiv/
+rh_cognitv/
 └── nodes/
     ├── __init__.py
     ├── base.py                    # BaseNode ABC
@@ -207,7 +207,7 @@ Nodes accept optional `on_request: Callable` and `on_response: Callable` callbac
 For v1, users manually import and instantiate the adapter they want:
 
 ```python
-from rh_cognitiv.nodes.llm_adapters.openai_adapter import OpenAIAdapter
+from rh_cognitv.nodes.llm_adapters.openai_adapter import OpenAIAdapter
 adapter = OpenAIAdapter(api_key="...")
 ```
 
@@ -223,7 +223,7 @@ Provider SDKs are optional dependencies. Each adapter module uses lazy imports:
 try:
     import openai
 except ImportError:
-    raise ImportError("Install rh_cognitiv[openai] to use the OpenAI adapter")
+    raise ImportError("Install rh_cognitv[openai] to use the OpenAI adapter")
 ```
 
 Update `pyproject.toml` to add `anthropic` and `google-genai` optional dependency groups.
@@ -403,12 +403,13 @@ class EmbeddingResult(BaseModel):
 
 ---
 
-### Phase 6 — Anthropic + Gemini Adapters
+### Phase 6 — Gemini Adapters
 
 **Goal:** Prove the adapter abstraction works across providers.
 
+> Previuos version had anthopic adapter, I've defer it for while, put a note on future.md
+
 **Deliverables:**
-- `nodes/llm_adapters/anthropic_adapter.py` — Implements `TextAdapter`, `StreamAdapter`, `StructuredAdapter` (Anthropic supports all three). Error mapping for Anthropic exceptions.
 - `nodes/llm_adapters/gemini_adapter.py` — Implements `TextAdapter`, `StreamAdapter`, `StructuredAdapter`, `EmbeddingAdapter`. Error mapping for Gemini exceptions.
 
 **Tests:**
