@@ -7,8 +7,15 @@ models, and the pluggable provider-adapter interfaces.
 """
 
 from rh_cognitv.nodes.base import BaseNode
+from rh_cognitv.nodes.llm.embedding_node import LLMEmbeddingNode
 from rh_cognitv.nodes.llm.stream_node import LLMStreamNode
 from rh_cognitv.nodes.llm.structured_node import LLMStructuredNode
 from rh_cognitv.nodes.llm.text_node import LLMTextNode
 
-__all__ = ["BaseNode", "LLMTextNode", "LLMStreamNode", "LLMStructuredNode"]
+__all__ = [
+    "BaseNode",
+    "LLMTextNode",
+    "LLMStreamNode",
+    "LLMStructuredNode",
+    "LLMEmbeddingNode",
+]

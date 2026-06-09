@@ -140,6 +140,13 @@ class StructuredResult(BaseModel):
 # --------------------------------------------------------------------------- #
 # Embedding
 # --------------------------------------------------------------------------- #
+class EmbeddingRequest(BaseModel):
+    """Canonical embedding request delivered to ``on_request`` callbacks (SG-01)."""
+
+    texts: list[str]
+    config: LLMConfig
+
+
 class EmbeddingResult(BaseModel):
     """Result of a batch text→embedding call."""
 

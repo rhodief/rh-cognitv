@@ -24,10 +24,12 @@ from rh_cognitv.nodes.llm.events import (
     StreamStarted,
     StreamTextDelta,
 )
+from rh_cognitv.nodes.llm.embedding_node import LLMEmbeddingNode
 from rh_cognitv.nodes.llm.stream_node import LLMStreamNode
 from rh_cognitv.nodes.llm.structured_node import LLMStructuredNode
 from rh_cognitv.nodes.llm.text_node import LLMTextNode
 from rh_cognitv.nodes.llm.types import (
+    EmbeddingRequest,
     EmbeddingResult,
     LLMConfig,
     LLMRequest,
@@ -56,6 +58,7 @@ __all__ = [
     "ToolDefinition",
     "ToolCallResult",
     "StructuredResult",
+    "EmbeddingRequest",
     "EmbeddingResult",
     "normalize_prompt",
     # errors
@@ -79,4 +82,5 @@ __all__ = [
     "LLMTextNode",
     "LLMStreamNode",
     "LLMStructuredNode",
+    "LLMEmbeddingNode",
 ]

@@ -119,3 +119,20 @@ v1 uses manual adapter instantiation. When the provider ecosystem grows (5+ adap
 ### EventBus Observability (from SG-01)
 
 v1 uses callback hooks. When the EventBus is built (item #1 above), migrate observability from callbacks to structured event emission (`llm_request_sent`, `llm_response_received`). This enables multiple subscribers and integrates with the framework-wide observability infrastructure.
+
+---
+
+## 9. Anthropic Adapter (Deferred)
+
+**What:** A `ClaudeAdapter` / `AnthropicAdapter` implementing the canonical adapter contract (`TextAdapter`, `StreamAdapter`, `StructuredAdapter`) for Anthropic Claude models.
+
+**Current state:** A previous iteration included an Anthropic adapter. It has been deferred for now to keep Phase 6 focused on the Gemini adapter. The `anthropic` optional dependency group still exists in `pyproject.toml` so the adapter can be added back without packaging changes.
+
+**How it enhances the package:**
+- Adds a third first-party provider, strengthening the multi-provider story (OpenAI + Gemini + Anthropic) and proving the adapter abstraction across three distinct SDK shapes.
+- Claude's tool-use API maps cleanly onto `LLMStructuredNode` via the `ToolDefinition` wrapper (DD-06) and tool-argument validation (SG-05).
+
+**Design considerations when building:**
+- Mirror the structure of [openai_adapter.py](../rh_cognitv/nodes/llm_adapters/openai_adapter.py) and [gemini_adapter.py](../rh_cognitv/nodes/llm_adapters/gemini_adapter.py): `provider = "anthropic"`, constructor injection of the client (DD-03), lazy SDK import (SG-03), and a `map_anthropic_exception()` mapping HTTP status to the canonical `LLMError` taxonomy (DD-09).
+- Anthropic has **no native embeddings API**, so the adapter should implement only the text / stream / structured capabilities (not `EmbeddingAdapter`) — exactly the per-capability ABC composition that DD-02 was designed for.
+- System prompts are a top-level `system` parameter (not a message role), similar to Gemini's `system_instruction`.

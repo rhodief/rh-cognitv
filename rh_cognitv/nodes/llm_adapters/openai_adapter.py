@@ -33,6 +33,7 @@ from rh_cognitv.nodes.llm.errors import (
     map_http_status_to_error_family,
 )
 from rh_cognitv.nodes.llm.types import (
+    EmbeddingResult,
     LLMConfig,
     LLMResultMeta,
     Message,
@@ -44,6 +45,7 @@ from rh_cognitv.nodes.llm.types import (
     ToolDefinition,
 )
 from rh_cognitv.nodes.llm_adapters.base import (
+    EmbeddingAdapter,
     StreamAdapter,
     StructuredAdapter,
     TextAdapter,
@@ -169,11 +171,12 @@ def _map_tool_choice(tool_choice: str | None) -> str | dict[str, Any]:
     return {"type": "function", "function": {"name": tool_choice}}
 
 
-class OpenAIAdapter(TextAdapter, StreamAdapter, StructuredAdapter):
+class OpenAIAdapter(TextAdapter, StreamAdapter, StructuredAdapter, EmbeddingAdapter):
     """OpenAI-backed adapter.
 
     Implements :class:`TextAdapter` (Phase 2), :class:`StreamAdapter`
-    (Phase 3), and :class:`StructuredAdapter` (Phase 4).
+    (Phase 3), :class:`StructuredAdapter` (Phase 4), and
+    :class:`EmbeddingAdapter` (Phase 5).
     """
 
     provider = PROVIDER
@@ -298,4 +301,30 @@ class OpenAIAdapter(TextAdapter, StreamAdapter, StructuredAdapter):
             raw_response=response,
         )
         return StructuredResult(tool_calls=tool_calls, meta=meta)
+
+    async def embed(
+        self,
+        texts: list[str],
+        config: LLMConfig,
+    ) -> EmbeddingResult:
+        payload: dict[str, Any] = {"model": config.model, "input": texts}
+        payload.update(config.extra)
+
+        start = time.perf_counter()
+        try:
+            response = await self._client.embeddings.create(**payload)
+        except Exception as exc:
+            raise map_openai_exception(exc) from exc
+        duration_ms = (time.perf_counter() - start) * 1000
+
+        items = sorted(response.data, key=lambda d: getattr(d, "index", 0))
+        embeddings = [list(item.embedding) for item in items]
+        meta = LLMResultMeta(
+            model=getattr(response, "model", config.model),
+            provider=PROVIDER,
+            tokens_used=_token_usage(getattr(response, "usage", None)),
+            duration_ms=duration_ms,
+            raw_response=response,
+        )
+        return EmbeddingResult(embeddings=embeddings, meta=meta)
 
