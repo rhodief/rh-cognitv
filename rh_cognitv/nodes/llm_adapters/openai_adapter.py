@@ -15,6 +15,7 @@ phases extend it with the stream, structured, and embedding interfaces.
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -28,6 +29,7 @@ from rh_cognitv.nodes.llm.errors import (
     ProviderError,
     RateLimitError,
     TimeoutError,
+    ToolValidationError,
     map_http_status_to_error_family,
 )
 from rh_cognitv.nodes.llm.types import (
@@ -35,10 +37,17 @@ from rh_cognitv.nodes.llm.types import (
     LLMResultMeta,
     Message,
     StreamDelta,
+    StructuredResult,
     TextResult,
     TokenUsage,
+    ToolCallResult,
+    ToolDefinition,
 )
-from rh_cognitv.nodes.llm_adapters.base import StreamAdapter, TextAdapter
+from rh_cognitv.nodes.llm_adapters.base import (
+    StreamAdapter,
+    StructuredAdapter,
+    TextAdapter,
+)
 
 PROVIDER = "openai"
 
@@ -135,11 +144,36 @@ def _token_usage(usage: Any) -> TokenUsage:
     )
 
 
-class OpenAIAdapter(TextAdapter, StreamAdapter):
+def _to_openai_tool(tool: ToolDefinition) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": tool.parameters_model.model_json_schema(),
+        },
+    }
+
+
+def _map_tool_choice(tool_choice: str | None) -> str | dict[str, Any]:
+    """Map canonical ``tool_choice`` to OpenAI's native format (DD-07).
+
+    ``None`` → ``"required"`` (the node exists to call a tool; the model picks
+    which). The keywords ``"auto"`` / ``"required"`` / ``"none"`` pass through;
+    any other string forces that specific tool by name.
+    """
+    if tool_choice is None or tool_choice == "required":
+        return "required"
+    if tool_choice in ("auto", "none"):
+        return tool_choice
+    return {"type": "function", "function": {"name": tool_choice}}
+
+
+class OpenAIAdapter(TextAdapter, StreamAdapter, StructuredAdapter):
     """OpenAI-backed adapter.
 
-    Implements :class:`TextAdapter` (Phase 2) and :class:`StreamAdapter`
-    (Phase 3).
+    Implements :class:`TextAdapter` (Phase 2), :class:`StreamAdapter`
+    (Phase 3), and :class:`StructuredAdapter` (Phase 4).
     """
 
     provider = PROVIDER
@@ -214,3 +248,54 @@ class OpenAIAdapter(TextAdapter, StreamAdapter):
                 yield StreamDelta(text=text, usage=usage, model=model)
         except Exception as exc:
             raise map_openai_exception(exc) from exc
+
+    async def generate_structured(
+        self,
+        messages: list[Message],
+        config: LLMConfig,
+        tools: list[ToolDefinition],
+        tool_choice: str | None = None,
+    ) -> StructuredResult:
+        payload = _build_payload(messages, config)
+        payload["tools"] = [_to_openai_tool(t) for t in tools]
+        payload["tool_choice"] = _map_tool_choice(tool_choice)
+
+        start = time.perf_counter()
+        try:
+            response = await self._client.chat.completions.create(**payload)
+        except Exception as exc:
+            raise map_openai_exception(exc) from exc
+        duration_ms = (time.perf_counter() - start) * 1000
+
+        message = response.choices[0].message
+        raw_calls = getattr(message, "tool_calls", None) or []
+        tool_calls: list[ToolCallResult] = []
+        for raw in raw_calls:
+            function = raw.function
+            name = function.name
+            raw_args = function.arguments or "{}"
+            try:
+                arguments = json.loads(raw_args)
+            except json.JSONDecodeError as exc:
+                raise ToolValidationError(
+                    f"Tool {name!r} returned non-JSON arguments: {raw_args!r}",
+                    tool_name=name,
+                    provider=PROVIDER,
+                ) from exc
+            tool_calls.append(
+                ToolCallResult(
+                    tool_name=name,
+                    arguments=arguments,
+                    call_id=getattr(raw, "id", None),
+                )
+            )
+
+        meta = LLMResultMeta(
+            model=getattr(response, "model", config.model),
+            provider=PROVIDER,
+            tokens_used=_token_usage(getattr(response, "usage", None)),
+            duration_ms=duration_ms,
+            raw_response=response,
+        )
+        return StructuredResult(tool_calls=tool_calls, meta=meta)
+

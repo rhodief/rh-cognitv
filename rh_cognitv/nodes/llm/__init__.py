@@ -25,6 +25,7 @@ from rh_cognitv.nodes.llm.events import (
     StreamTextDelta,
 )
 from rh_cognitv.nodes.llm.stream_node import LLMStreamNode
+from rh_cognitv.nodes.llm.structured_node import LLMStructuredNode
 from rh_cognitv.nodes.llm.text_node import LLMTextNode
 from rh_cognitv.nodes.llm.types import (
     EmbeddingResult,
@@ -77,4 +78,5 @@ __all__ = [
     # nodes
     "LLMTextNode",
     "LLMStreamNode",
+    "LLMStructuredNode",
 ]

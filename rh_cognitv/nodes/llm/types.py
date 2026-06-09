@@ -38,10 +38,16 @@ class LLMConfig(BaseModel):
 
 
 class LLMRequest(BaseModel):
-    """Canonical request payload delivered to ``on_request`` callbacks (SG-01)."""
+    """Canonical request payload delivered to ``on_request`` callbacks (SG-01).
+
+    ``tools`` / ``tool_choice`` are populated only for tool-calling requests
+    (``LLMStructuredNode``); they are ``None`` for plain text/stream requests.
+    """
 
     messages: list[Message]
     config: LLMConfig
+    tools: list["ToolDefinition"] | None = None
+    tool_choice: str | None = None
 
 
 class TokenUsage(BaseModel):
@@ -153,3 +159,7 @@ def normalize_prompt(prompt: str | list[Message]) -> list[Message]:
     if isinstance(prompt, str):
         return [Message(role="user", content=prompt)]
     return list(prompt)
+
+
+# ``LLMRequest`` forward-references ``ToolDefinition`` (defined above); resolve it.
+LLMRequest.model_rebuild()
