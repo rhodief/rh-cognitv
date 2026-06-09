@@ -1,0 +1,1 @@
+docker run -it --rm -p 2222:22 -p 8501:8501 -p 8766:8766 -p 8000:8000 --env-file .env --name rh-dev-container rhodie/rh-cognitiv-dev

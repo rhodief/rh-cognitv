@@ -1,0 +1,6 @@
+pytest
+pytest-cov
+hypothesis
+pytest-asyncio
+setuptools
+python-dotenv

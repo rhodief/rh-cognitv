@@ -1,0 +1,26 @@
+# PyPI credentials template.
+#
+# This file goes in your HOME directory, NOT in the project:
+#
+#   cp .pypirc-template ~/.pypirc
+#   chmod 600 ~/.pypirc          # restrict permissions
+#
+# Then replace the token placeholders with real API tokens from:
+#   PyPI:      https://pypi.org/manage/account/token/
+#   Test PyPI: https://test.pypi.org/manage/account/token/
+#
+# NEVER commit ~/.pypirc or real tokens to version control.
+
+[distutils]
+index-servers =
+    pypi
+    testpypi
+
+[pypi]
+username = __token__
+password = pypi-REPLACE_WITH_YOUR_PYPI_TOKEN
+
+[testpypi]
+repository = https://test.pypi.org/legacy/
+username = __token__
+password = pypi-REPLACE_WITH_YOUR_TEST_PYPI_TOKEN

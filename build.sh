@@ -1,0 +1,1 @@
+DOCKER_BUILDKIT=1 docker build --secret id=ssh_pub_key,src=$HOME/.ssh/rh_cognitiv_key.pub -t rhodie/rh-cognitiv-dev -f Dockerfile.dev .
