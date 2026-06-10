@@ -141,16 +141,30 @@ class _ToolCallAccumulator:
 
 
 class LLMStreamNode(BaseNode[AsyncGenerator[StreamEvent, None]]):
-    """Streaming text/object completion node."""
+    """Streaming text/object completion node.
+
+    When ``accumulate`` is ``True`` (the default) the node stores the
+    consolidated :class:`~rh_cognitv.nodes.llm.types.StreamResult` of the
+    most-recent :meth:`run` call on ``self.result``.  This lets callers drive
+    their own ``async for`` event loop and still access ``node.result.text`` /
+    ``node.result.tool_calls`` afterwards, without a second :meth:`collect`
+    call or any provider-specific final-chunk assumptions.
+
+    Set ``accumulate=False`` when you only consume events and never need the
+    consolidated result, to avoid holding the reference.
+    """
 
     def __init__(
         self,
         adapter: StreamAdapter,
         *,
         on_event: OnEvent | None = None,
+        accumulate: bool = True,
     ) -> None:
         self.adapter = adapter
         self.on_event = on_event
+        self.accumulate = accumulate
+        self.result: StreamResult | None = None
 
     async def run(
         self,
@@ -282,6 +296,13 @@ class LLMStreamNode(BaseNode[AsyncGenerator[StreamEvent, None]]):
             tool_calls=tool_calls,
             meta=meta,
         )
+        if self.accumulate:
+            self.result = StreamResult(
+                text=completed.text,
+                object=completed.object,
+                tool_calls=completed.tool_calls,
+                meta=completed.meta,
+            )
         await dispatch(completed)
         yield completed
 
@@ -318,7 +339,11 @@ class LLMStreamNode(BaseNode[AsyncGenerator[StreamEvent, None]]):
         batch_size: int = 1,
         on_event: OnEvent | None = None,
     ) -> StreamResult:
-        """Drive the stream to completion and return the consolidated result."""
+        """Drive the stream to completion and return the consolidated result.
+
+        When ``accumulate`` is ``True``, ``self.result`` is also updated and
+        the returned object is the same instance as ``self.result``.
+        """
         result: StreamResult | None = None
         async for event in self.run(
             prompt,
@@ -329,13 +354,17 @@ class LLMStreamNode(BaseNode[AsyncGenerator[StreamEvent, None]]):
             batch_size=batch_size,
             on_event=on_event,
         ):
-            if isinstance(event, StreamCompleted):
+            if isinstance(event, StreamCompleted) and not self.accumulate:
                 result = StreamResult(
                     text=event.text,
                     object=event.object,
                     tool_calls=event.tool_calls,
                     meta=event.meta,
                 )
-        if result is None:  # pragma: no cover - run always emits StreamCompleted
+        if self.accumulate:
+            if self.result is None:  # pragma: no cover
+                raise RuntimeError("stream completed without a StreamCompleted event")
+            return self.result
+        if result is None:  # pragma: no cover
             raise RuntimeError("stream completed without a StreamCompleted event")
         return result

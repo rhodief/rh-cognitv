@@ -249,6 +249,47 @@ class TestCollect:
         assert result.text == "Hello world"
 
 
+@pytest.mark.asyncio
+class TestAccumulate:
+    async def test_result_none_before_run(self, config):
+        node = LLMStreamNode(FakeStreamAdapter(text_deltas("hi")))
+        assert node.result is None
+
+    async def test_result_populated_after_run(self, config):
+        node = LLMStreamNode(FakeStreamAdapter(text_deltas("hello", " world")))
+        _ = [e async for e in node.run("x", config)]
+        assert isinstance(node.result, StreamResult)
+        assert node.result.text == "hello world"
+
+    async def test_collect_returns_same_instance_as_result(self, config):
+        node = LLMStreamNode(FakeStreamAdapter(text_deltas("hi")))
+        returned = await node.collect("x", config)
+        assert returned is node.result
+
+    async def test_result_updated_on_subsequent_runs(self, config):
+        node = LLMStreamNode(FakeStreamAdapter(text_deltas("first")))
+        _ = [e async for e in node.run("x", config)]
+        first = node.result
+
+        node.deltas = None  # swap adapter to produce different text
+        node.adapter = FakeStreamAdapter(text_deltas("second"))
+        _ = [e async for e in node.run("x", config)]
+        assert node.result is not first
+        assert node.result.text == "second"
+
+    async def test_accumulate_false_result_stays_none(self, config):
+        node = LLMStreamNode(FakeStreamAdapter(text_deltas("hi")), accumulate=False)
+        _ = [e async for e in node.run("x", config)]
+        assert node.result is None
+
+    async def test_accumulate_false_collect_still_returns_result(self, config):
+        node = LLMStreamNode(FakeStreamAdapter(text_deltas("hi")), accumulate=False)
+        result = await node.collect("x", config)
+        assert isinstance(result, StreamResult)
+        assert result.text == "hi"
+        assert node.result is None  # not stored on the node
+
+
 class _WeatherArgs(BaseModel):
     city: str
 
