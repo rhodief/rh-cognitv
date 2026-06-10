@@ -33,6 +33,7 @@ from rh_cognitv.nodes.llm.types import (
     LLMRequest,
     Message,
     StructuredResult,
+    ToolCallResult,
     ToolDefinition,
     normalize_prompt,
 )
@@ -46,6 +47,35 @@ async def _maybe_await(value: Any) -> None:
     """Await ``value`` if it is awaitable; otherwise do nothing."""
     if inspect.isawaitable(value):
         await value
+
+
+def validate_tool_calls(
+    tool_calls: list[ToolCallResult], tools: list[ToolDefinition]
+) -> None:
+    """Validate each tool call's arguments and populate ``parsed_arguments`` (SG-05).
+
+    Shared by :class:`LLMStructuredNode` and ``LLMStreamNode``. Raises a
+    retryable :class:`~rh_cognitv.nodes.llm.errors.ToolValidationError` when a
+    call names an unknown tool or its arguments fail schema validation.
+    """
+    tool_map = {tool.name: tool for tool in tools}
+    for call in tool_calls:
+        tool = tool_map.get(call.tool_name)
+        if tool is None:
+            raise ToolValidationError(
+                f"Model called unknown tool {call.tool_name!r}; "
+                f"expected one of {sorted(tool_map)}",
+                tool_name=call.tool_name,
+            )
+        try:
+            call.parsed_arguments = tool.parameters_model.model_validate(
+                call.arguments
+            )
+        except ValidationError as exc:
+            raise ToolValidationError(
+                f"Arguments for tool {call.tool_name!r} failed validation: {exc}",
+                tool_name=call.tool_name,
+            ) from exc
 
 
 class LLMStructuredNode(BaseNode[StructuredResult]):
@@ -101,21 +131,4 @@ class LLMStructuredNode(BaseNode[StructuredResult]):
     @staticmethod
     def _validate(result: StructuredResult, tools: list[ToolDefinition]) -> None:
         """Validate each tool call's arguments and populate ``parsed_arguments``."""
-        tool_map = {tool.name: tool for tool in tools}
-        for call in result.tool_calls:
-            tool = tool_map.get(call.tool_name)
-            if tool is None:
-                raise ToolValidationError(
-                    f"Model called unknown tool {call.tool_name!r}; "
-                    f"expected one of {sorted(tool_map)}",
-                    tool_name=call.tool_name,
-                )
-            try:
-                call.parsed_arguments = tool.parameters_model.model_validate(
-                    call.arguments
-                )
-            except ValidationError as exc:
-                raise ToolValidationError(
-                    f"Arguments for tool {call.tool_name!r} failed validation: {exc}",
-                    tool_name=call.tool_name,
-                ) from exc
+        validate_tool_calls(result.tool_calls, tools)

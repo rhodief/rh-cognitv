@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from rh_cognitv.nodes.llm.errors import LLMError, RateLimitError
+from rh_cognitv.nodes.llm.errors import LLMError, RateLimitError, ToolValidationError
 from rh_cognitv.nodes.llm.events import (
     StreamCompleted,
     StreamErrorEvent,
@@ -17,9 +17,13 @@ from rh_cognitv.nodes.llm.types import (
     Message,
     StreamDelta,
     StreamResult,
+    StreamToolCallDelta,
     TokenUsage,
+    ToolDefinition,
 )
 from rh_cognitv.nodes.llm_adapters.base import StreamAdapter
+
+from pydantic import BaseModel
 
 
 class FakeStreamAdapter(StreamAdapter):
@@ -32,9 +36,13 @@ class FakeStreamAdapter(StreamAdapter):
         self.raise_at = raise_at
         self.exc = exc or RateLimitError("boom")
         self.calls: list[tuple[list[Message], LLMConfig]] = []
+        self.last_tools = None
+        self.last_tool_choice = None
 
-    def stream_text(self, messages, config):
+    def stream_text(self, messages, config, tools=None, tool_choice=None):
         self.calls.append((messages, config))
+        self.last_tools = tools
+        self.last_tool_choice = tool_choice
 
         async def _gen():
             for i, delta in enumerate(self.deltas):
@@ -239,3 +247,123 @@ class TestCollect:
         result = await node.collect("hi", config)
         assert isinstance(result, StreamResult)
         assert result.text == "Hello world"
+
+
+class _WeatherArgs(BaseModel):
+    city: str
+
+
+_WEATHER_TOOL = ToolDefinition(
+    name="get_weather",
+    description="Get weather",
+    parameters_model=_WeatherArgs,
+)
+
+
+def _tool_delta(index, name=None, args=None, call_id=None):
+    return StreamDelta(
+        tool_call_deltas=[
+            StreamToolCallDelta(
+                index=index, tool_name=name, arguments_delta=args, call_id=call_id
+            )
+        ]
+    )
+
+
+@pytest.mark.asyncio
+class TestStreamingToolCalls:
+    async def test_consolidates_fragmented_tool_call(self, config):
+        # OpenAI-style: name/id first, then argument fragments.
+        deltas = [
+            _tool_delta(0, name="get_weather", call_id="c1"),
+            _tool_delta(0, args='{"city": '),
+            _tool_delta(0, args='"Paris"}'),
+        ]
+        node = LLMStreamNode(FakeStreamAdapter(deltas))
+        events = [e async for e in node.run("weather?", config, tools=[_WEATHER_TOOL])]
+
+        completed = events[-1]
+        assert isinstance(completed, StreamCompleted)
+        assert len(completed.tool_calls) == 1
+        call = completed.tool_calls[0]
+        assert call.tool_name == "get_weather"
+        assert call.arguments == {"city": "Paris"}
+        assert call.call_id == "c1"
+        assert isinstance(call.parsed_arguments, _WeatherArgs)
+        assert call.parsed_arguments.city == "Paris"
+
+    async def test_multiple_tool_calls_by_index(self, config):
+        deltas = [
+            _tool_delta(0, name="get_weather", args='{"city": "Paris"}', call_id="c1"),
+            _tool_delta(1, name="get_weather", args='{"city": "Rome"}', call_id="c2"),
+        ]
+        node = LLMStreamNode(FakeStreamAdapter(deltas))
+        result = await node.collect("x", config, tools=[_WEATHER_TOOL])
+        assert [c.arguments["city"] for c in result.tool_calls] == ["Paris", "Rome"]
+
+    async def test_collect_exposes_tool_calls(self, config):
+        deltas = [_tool_delta(0, name="get_weather", args='{"city": "Paris"}')]
+        node = LLMStreamNode(FakeStreamAdapter(deltas))
+        result = await node.collect("x", config, tools=[_WEATHER_TOOL])
+        assert isinstance(result, StreamResult)
+        assert result.tool_calls[0].parsed_arguments.city == "Paris"
+
+    async def test_tool_call_deltas_emitted_on_events(self, config):
+        deltas = [_tool_delta(0, name="get_weather", args='{"city": "Paris"}')]
+        node = LLMStreamNode(FakeStreamAdapter(deltas))
+        events = [e async for e in node.run("x", config, tools=[_WEATHER_TOOL])]
+        text_deltas_with_tools = [
+            e
+            for e in events
+            if isinstance(e, StreamTextDelta) and e.tool_call_deltas
+        ]
+        assert len(text_deltas_with_tools) == 1
+
+    async def test_validation_failure_raises(self, config):
+        deltas = [_tool_delta(0, name="get_weather", args='{"wrong": "field"}')]
+        node = LLMStreamNode(FakeStreamAdapter(deltas))
+        with pytest.raises(ToolValidationError):
+            async for _ in node.run("x", config, tools=[_WEATHER_TOOL]):
+                pass
+
+    async def test_unknown_tool_raises(self, config):
+        deltas = [_tool_delta(0, name="unknown_tool", args="{}")]
+        node = LLMStreamNode(FakeStreamAdapter(deltas))
+        with pytest.raises(ToolValidationError):
+            async for _ in node.run("x", config, tools=[_WEATHER_TOOL]):
+                pass
+
+    async def test_validate_opt_out_keeps_raw_dicts(self, config):
+        deltas = [_tool_delta(0, name="get_weather", args='{"wrong": "field"}')]
+        node = LLMStreamNode(FakeStreamAdapter(deltas))
+        result = await node.collect(
+            "x", config, tools=[_WEATHER_TOOL], validate_tool_args=False
+        )
+        assert result.tool_calls[0].arguments == {"wrong": "field"}
+        assert result.tool_calls[0].parsed_arguments is None
+
+    async def test_bad_json_emits_error_and_raises(self, config):
+        deltas = [_tool_delta(0, name="get_weather", args="{not json")]
+        node = LLMStreamNode(FakeStreamAdapter(deltas))
+        collected = []
+        with pytest.raises(ToolValidationError):
+            async for event in node.run("x", config, tools=[_WEATHER_TOOL]):
+                collected.append(event)
+        assert isinstance(collected[-1], StreamErrorEvent)
+
+    async def test_no_tools_leaves_tool_calls_empty(self, config):
+        node = LLMStreamNode(FakeStreamAdapter(text_deltas("hi")))
+        result = await node.collect("x", config)
+        assert result.tool_calls == []
+
+    async def test_adapter_receives_tools_and_choice(self, config):
+        adapter = FakeStreamAdapter(text_deltas("hi"))
+        node = LLMStreamNode(adapter)
+        _ = [
+            e
+            async for e in node.run(
+                "x", config, tools=[_WEATHER_TOOL], tool_choice="get_weather"
+            )
+        ]
+        assert adapter.last_tools == [_WEATHER_TOOL]
+        assert adapter.last_tool_choice == "get_weather"

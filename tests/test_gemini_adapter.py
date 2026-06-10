@@ -7,6 +7,7 @@ error-mapping logic is tested directly against simple stand-in exceptions.
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -104,6 +105,15 @@ def make_text_response(text="hello", model="gemini-2.0-flash", usage=True):
 
 def make_chunk(text=None, model="gemini-2.0-flash", usage=None):
     return SimpleNamespace(text=text, model_version=model, usage_metadata=usage)
+
+
+def make_tool_chunk(calls, model="gemini-2.0-flash", usage=None):
+    return SimpleNamespace(
+        text=None,
+        function_calls=calls,
+        model_version=model,
+        usage_metadata=usage,
+    )
 
 
 def make_function_call(name, args, call_id="call_1"):
@@ -363,6 +373,60 @@ class TestStreamText:
                     [Message(role="user", content="x")], config
                 )
             ]
+
+    async def test_stream_yields_tool_call_deltas(self, config):
+        chunks = [
+            make_tool_chunk([make_function_call("get_weather", {"city": "Paris"})]),
+        ]
+        adapter = GeminiAdapter(client=FakeClient(stream=FakeStream(chunks)))
+        out = [
+            d
+            async for d in adapter.stream_text(
+                [Message(role="user", content="x")], config, tools=[WEATHER_TOOL]
+            )
+        ]
+        frags = [f for d in out if d.tool_call_deltas for f in d.tool_call_deltas]
+        assert len(frags) == 1
+        assert frags[0].tool_name == "get_weather"
+        assert frags[0].call_id == "call_1"
+        assert json.loads(frags[0].arguments_delta) == {"city": "Paris"}
+
+    async def test_stream_multiple_tool_calls_get_distinct_indices(self, config):
+        chunks = [
+            make_tool_chunk([make_function_call("get_weather", {"city": "Paris"})]),
+            make_tool_chunk([make_function_call("get_weather", {"city": "Rome"})]),
+        ]
+        adapter = GeminiAdapter(client=FakeClient(stream=FakeStream(chunks)))
+        out = [
+            d
+            async for d in adapter.stream_text(
+                [Message(role="user", content="x")], config, tools=[WEATHER_TOOL]
+            )
+        ]
+        frags = [f for d in out if d.tool_call_deltas for f in d.tool_call_deltas]
+        assert [f.index for f in frags] == [0, 1]
+
+    async def test_stream_tools_in_gen_config(self, config):
+        client = FakeClient(stream=FakeStream([make_chunk("hi")]))
+        adapter = GeminiAdapter(client=client)
+        _ = [
+            d
+            async for d in adapter.stream_text(
+                [Message(role="user", content="x")],
+                config,
+                tools=[WEATHER_TOOL],
+                tool_choice="get_weather",
+            )
+        ]
+        gen_config = client.models.last_kwargs["config"]
+        assert "tools" in gen_config
+        assert gen_config["tool_config"] == {
+            "function_calling_config": {
+                "mode": "ANY",
+                "allowed_function_names": ["get_weather"],
+            }
+        }
+
 
 
 # --------------------------------------------------------------------------- #

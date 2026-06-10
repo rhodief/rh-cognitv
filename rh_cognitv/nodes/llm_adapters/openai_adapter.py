@@ -38,6 +38,7 @@ from rh_cognitv.nodes.llm.types import (
     LLMResultMeta,
     Message,
     StreamDelta,
+    StreamToolCallDelta,
     StructuredResult,
     TextResult,
     TokenUsage,
@@ -171,6 +172,32 @@ def _map_tool_choice(tool_choice: str | None) -> str | dict[str, Any]:
     return {"type": "function", "function": {"name": tool_choice}}
 
 
+def _stream_tool_call_deltas(delta: Any) -> list[StreamToolCallDelta] | None:
+    """Extract streamed tool-call fragments from an OpenAI delta.
+
+    OpenAI streams tool calls incrementally: the ``id`` / ``name`` arrive on the
+    first fragment for a given ``index`` and the ``arguments`` arrive as partial
+    JSON strings on subsequent fragments.
+    """
+    raw_calls = getattr(delta, "tool_calls", None)
+    if not raw_calls:
+        return None
+    fragments: list[StreamToolCallDelta] = []
+    for raw in raw_calls:
+        function = getattr(raw, "function", None)
+        fragments.append(
+            StreamToolCallDelta(
+                index=getattr(raw, "index", 0) or 0,
+                call_id=getattr(raw, "id", None),
+                tool_name=getattr(function, "name", None) if function else None,
+                arguments_delta=getattr(function, "arguments", None)
+                if function
+                else None,
+            )
+        )
+    return fragments
+
+
 class OpenAIAdapter(TextAdapter, StreamAdapter, StructuredAdapter, EmbeddingAdapter):
     """OpenAI-backed adapter.
 
@@ -228,27 +255,45 @@ class OpenAIAdapter(TextAdapter, StreamAdapter, StructuredAdapter, EmbeddingAdap
         self,
         messages: list[Message],
         config: LLMConfig,
+        tools: list[ToolDefinition] | None = None,
+        tool_choice: str | None = None,
     ) -> AsyncIterator[StreamDelta]:
         payload = _build_payload(messages, config)
         payload["stream"] = True
         payload.setdefault("stream_options", {"include_usage": True})
+        if tools:
+            payload["tools"] = [_to_openai_tool(t) for t in tools]
+            payload["tool_choice"] = _map_tool_choice(tool_choice)
 
         try:
             stream = await self._client.chat.completions.create(**payload)
             async for chunk in stream:
                 text: str | None = None
+                tool_call_deltas: list[StreamToolCallDelta] | None = None
                 choices = getattr(chunk, "choices", None) or []
                 if choices:
                     delta = getattr(choices[0], "delta", None)
-                    text = getattr(delta, "content", None) if delta is not None else None
+                    if delta is not None:
+                        text = getattr(delta, "content", None)
+                        tool_call_deltas = _stream_tool_call_deltas(delta)
 
                 raw_usage = getattr(chunk, "usage", None)
                 usage = _token_usage(raw_usage) if raw_usage is not None else None
                 model = getattr(chunk, "model", None)
 
-                if text is None and usage is None and model is None:
+                if (
+                    text is None
+                    and tool_call_deltas is None
+                    and usage is None
+                    and model is None
+                ):
                     continue
-                yield StreamDelta(text=text, usage=usage, model=model)
+                yield StreamDelta(
+                    text=text,
+                    tool_call_deltas=tool_call_deltas,
+                    usage=usage,
+                    model=model,
+                )
         except Exception as exc:
             raise map_openai_exception(exc) from exc
 

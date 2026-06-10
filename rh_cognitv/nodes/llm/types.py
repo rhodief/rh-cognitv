@@ -73,10 +73,27 @@ class LLMResultMeta(BaseModel):
 # --------------------------------------------------------------------------- #
 # Stream
 # --------------------------------------------------------------------------- #
+class StreamToolCallDelta(BaseModel):
+    """An incremental tool-call fragment produced during streaming.
+
+    Providers differ in how they stream tool calls: OpenAI sends the
+    ``tool_name`` / ``call_id`` once (on the first fragment for a given
+    ``index``) and then streams ``arguments_delta`` as partial JSON strings;
+    Gemini sends each call complete in a single fragment. The node accumulates
+    fragments by ``index`` to reconstruct the final :class:`ToolCallResult`.
+    """
+
+    index: int
+    call_id: str | None = None
+    tool_name: str | None = None
+    arguments_delta: str | None = None  # partial JSON-encoded arguments
+
+
 class StreamDelta(BaseModel):
     """An incremental chunk produced during streaming.
 
-    ``text`` / ``object_fragment`` carry incremental content. ``usage`` and
+    ``text`` / ``object_fragment`` carry incremental content and
+    ``tool_call_deltas`` carries incremental tool-call fragments. ``usage`` and
     ``model`` are optional trailing metadata that providers attach to the final
     chunk (e.g. OpenAI with ``stream_options={"include_usage": True}``); the
     node uses them to build the consolidated :class:`StreamResult` meta.
@@ -84,15 +101,21 @@ class StreamDelta(BaseModel):
 
     text: str | None = None
     object_fragment: dict[str, Any] | None = None
+    tool_call_deltas: list[StreamToolCallDelta] | None = None
     usage: TokenUsage | None = None
     model: str | None = None
 
 
 class StreamResult(BaseModel):
-    """Consolidated result produced after a stream completes."""
+    """Consolidated result produced after a stream completes.
+
+    ``tool_calls`` holds the reconstructed tool calls when the stream was run
+    with tools (DD-07); it is an empty list for plain text/object streams.
+    """
 
     text: str
     object: dict[str, Any] | None = None
+    tool_calls: list["ToolCallResult"] = Field(default_factory=list)
     meta: LLMResultMeta
 
 
@@ -170,3 +193,5 @@ def normalize_prompt(prompt: str | list[Message]) -> list[Message]:
 
 # ``LLMRequest`` forward-references ``ToolDefinition`` (defined above); resolve it.
 LLMRequest.model_rebuild()
+# ``StreamResult`` forward-references ``ToolCallResult`` (defined below it).
+StreamResult.model_rebuild()

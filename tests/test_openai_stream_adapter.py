@@ -7,15 +7,28 @@ from types import SimpleNamespace
 import pytest
 
 from rh_cognitv.nodes.llm.errors import RateLimitError
-from rh_cognitv.nodes.llm.types import LLMConfig, Message
+from rh_cognitv.nodes.llm.types import LLMConfig, Message, ToolDefinition
 from rh_cognitv.nodes.llm_adapters.base import StreamAdapter
 from rh_cognitv.nodes.llm_adapters.openai_adapter import OpenAIAdapter
 
+from pydantic import BaseModel
+
+
+class _WeatherArgs(BaseModel):
+    city: str
 
 def make_chunk(content=None, model="gpt-4o-mini", usage=None):
     delta = SimpleNamespace(content=content)
     choice = SimpleNamespace(delta=delta)
     return SimpleNamespace(choices=[choice], model=model, usage=usage)
+
+
+def make_tool_chunk(index=0, call_id=None, name=None, arguments=None, model="gpt-4o-mini"):
+    function = SimpleNamespace(name=name, arguments=arguments)
+    raw_call = SimpleNamespace(index=index, id=call_id, function=function)
+    delta = SimpleNamespace(content=None, tool_calls=[raw_call])
+    choice = SimpleNamespace(delta=delta)
+    return SimpleNamespace(choices=[choice], model=model, usage=None)
 
 
 def usage_chunk(prompt=5, completion=7, total=12, model="gpt-4o-mini"):
@@ -97,3 +110,56 @@ class TestStreamText:
         adapter = OpenAIAdapter(client=FakeClient(stream))
         with pytest.raises(RateLimitError):
             _ = [d async for d in adapter.stream_text([Message(role="user", content="x")], config)]
+
+
+_WEATHER_TOOL = ToolDefinition(
+    name="get_weather", description="Get weather", parameters_model=_WeatherArgs
+)
+
+
+@pytest.mark.asyncio
+class TestStreamToolCalls:
+    async def test_yields_tool_call_deltas(self, config):
+        chunks = [
+            make_tool_chunk(index=0, call_id="c1", name="get_weather"),
+            make_tool_chunk(index=0, arguments='{"city": '),
+            make_tool_chunk(index=0, arguments='"Paris"}'),
+        ]
+        adapter = OpenAIAdapter(client=FakeClient(FakeStream(chunks)))
+        out = [
+            d
+            async for d in adapter.stream_text(
+                [Message(role="user", content="x")], config, tools=[_WEATHER_TOOL]
+            )
+        ]
+        frags = [f for d in out if d.tool_call_deltas for f in d.tool_call_deltas]
+        assert frags[0].tool_name == "get_weather"
+        assert frags[0].call_id == "c1"
+        assert "".join(f.arguments_delta or "" for f in frags) == '{"city": "Paris"}'
+
+    async def test_tools_and_choice_in_payload(self, config):
+        client = FakeClient(FakeStream([make_chunk("hi")]))
+        adapter = OpenAIAdapter(client=client)
+        _ = [
+            d
+            async for d in adapter.stream_text(
+                [Message(role="user", content="x")],
+                config,
+                tools=[_WEATHER_TOOL],
+                tool_choice="get_weather",
+            )
+        ]
+        kwargs = client.completions.last_kwargs
+        assert kwargs["tools"][0]["function"]["name"] == "get_weather"
+        assert kwargs["tool_choice"] == {
+            "type": "function",
+            "function": {"name": "get_weather"},
+        }
+
+    async def test_no_tools_omits_payload_keys(self, config):
+        client = FakeClient(FakeStream([make_chunk("hi")]))
+        adapter = OpenAIAdapter(client=client)
+        _ = [d async for d in adapter.stream_text([Message(role="user", content="x")], config)]
+        assert "tools" not in client.completions.last_kwargs
+        assert "tool_choice" not in client.completions.last_kwargs
+

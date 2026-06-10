@@ -21,6 +21,7 @@ importing the SDK types.
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -42,6 +43,7 @@ from rh_cognitv.nodes.llm.types import (
     LLMResultMeta,
     Message,
     StreamDelta,
+    StreamToolCallDelta,
     StructuredResult,
     TextResult,
     TokenUsage,
@@ -263,10 +265,18 @@ class GeminiAdapter(TextAdapter, StreamAdapter, StructuredAdapter, EmbeddingAdap
         self,
         messages: list[Message],
         config: LLMConfig,
+        tools: list[ToolDefinition] | None = None,
+        tool_choice: str | None = None,
     ) -> AsyncIterator[StreamDelta]:
         contents = _to_contents(messages)
         gen_config = _build_config(messages, config)
+        if tools:
+            gen_config["tools"] = [_to_gemini_tool(tools)]
+            gen_config["tool_config"] = _map_tool_config(tool_choice)
 
+        # Gemini sends each function call complete in a chunk (no partial
+        # arguments), so assign a running index to keep calls distinct.
+        next_index = 0
         try:
             stream = await self._client.aio.models.generate_content_stream(
                 model=config.model,
@@ -276,13 +286,38 @@ class GeminiAdapter(TextAdapter, StreamAdapter, StructuredAdapter, EmbeddingAdap
             async for chunk in stream:
                 text = _response_text(chunk) or None
 
+                tool_call_deltas: list[StreamToolCallDelta] | None = None
+                raw_calls = getattr(chunk, "function_calls", None) or []
+                if raw_calls:
+                    tool_call_deltas = []
+                    for raw in raw_calls:
+                        tool_call_deltas.append(
+                            StreamToolCallDelta(
+                                index=next_index,
+                                call_id=getattr(raw, "id", None),
+                                tool_name=raw.name,
+                                arguments_delta=json.dumps(dict(raw.args or {})),
+                            )
+                        )
+                        next_index += 1
+
                 raw_usage = getattr(chunk, "usage_metadata", None)
                 usage = _token_usage(raw_usage) if raw_usage is not None else None
                 model = getattr(chunk, "model_version", None)
 
-                if text is None and usage is None and model is None:
+                if (
+                    text is None
+                    and tool_call_deltas is None
+                    and usage is None
+                    and model is None
+                ):
                     continue
-                yield StreamDelta(text=text, usage=usage, model=model)
+                yield StreamDelta(
+                    text=text,
+                    tool_call_deltas=tool_call_deltas,
+                    usage=usage,
+                    model=model,
+                )
         except Exception as exc:
             raise map_gemini_exception(exc) from exc
 

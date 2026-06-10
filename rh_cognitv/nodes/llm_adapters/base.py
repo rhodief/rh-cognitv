@@ -51,6 +51,11 @@ class StreamAdapter(abc.ABC):
 
     Implementations yield raw :class:`StreamDelta` chunks; the node is
     responsible for batching, event emission, and consolidation.
+
+    Optional ``tools`` / ``tool_choice`` enable streamed tool calling (DD-07).
+    When ``tools`` is provided, implementations emit
+    :class:`~rh_cognitv.nodes.llm.types.StreamToolCallDelta` fragments on the
+    yielded :class:`StreamDelta`; the node reconstructs the final tool calls.
     """
 
     @abc.abstractmethod
@@ -58,6 +63,8 @@ class StreamAdapter(abc.ABC):
         self,
         messages: list[Message],
         config: LLMConfig,
+        tools: list[ToolDefinition] | None = None,
+        tool_choice: str | None = None,
     ) -> AsyncIterator[StreamDelta]:
         """Yield incremental :class:`StreamDelta` chunks for ``messages``."""
         raise NotImplementedError

@@ -14,7 +14,11 @@ from typing import Annotated, Any, Literal, Union
 
 from pydantic import BaseModel, Field
 
-from rh_cognitv.nodes.llm.types import LLMResultMeta
+from rh_cognitv.nodes.llm.types import (
+    LLMResultMeta,
+    StreamToolCallDelta,
+    ToolCallResult,
+)
 
 
 class StreamStarted(BaseModel):
@@ -31,6 +35,7 @@ class StreamTextDelta(BaseModel):
     type: Literal["stream_delta"] = "stream_delta"
     text: str | None = None
     object_fragment: dict[str, Any] | None = None
+    tool_call_deltas: list[StreamToolCallDelta] | None = None
     index: int = 0  # sequence number of this emitted (post-batch) event
 
 
@@ -40,6 +45,7 @@ class StreamCompleted(BaseModel):
     type: Literal["stream_completed"] = "stream_completed"
     text: str
     object: dict[str, Any] | None = None
+    tool_calls: list[ToolCallResult] = Field(default_factory=list)
     meta: LLMResultMeta
 
 
