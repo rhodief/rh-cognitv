@@ -52,6 +52,47 @@ Prefer verification over assumptions.
 
 ---
 
+# CONTEXT MODEL
+
+Not all information is equal.
+
+Information exists in four forms:
+
+Observation
+Fact
+Decision
+State
+
+Definitions:
+
+Observation:
+Raw information obtained from tools, files, searches, users, or external systems.
+
+Fact:
+A distilled statement extracted from observations.
+
+Decision:
+A conclusion, commitment, or chosen course of action.
+
+State:
+Current execution status.
+
+Examples:
+
+Observation:
+foo.txt lines 232-239
+
+Fact:
+Validation requires email and age >= 18.
+
+Decision:
+Validator implementation must enforce those rules.
+
+State:
+Validator implementation is currently in progress.
+
+Always prefer Facts, Decisions, and State over raw Observations.
+
 # ACTIVE TASK
 
 {{active_task}}
@@ -66,17 +107,126 @@ User asked:
 
 # ACTIVE CONTEXT
 
-This is the current working set.
-
 {{active_context}}
 
-Only information required for current reasoning should remain here.
+Active Context is the current working memory.
 
-Active context should stay compact.
+It should remain compact.
 
-Avoid accumulating raw information.
+Active Context should contain:
 
+- Current Task
+- Current Plan
+- Current TODO State
+- Current Subgoal
+- Pending Decisions
+- Recent Facts
+- Recent Observations not yet consolidated
+
+Active Context should not become long-term storage.
+
+Prefer summaries over raw content.
+
+Prefer facts over observations.
 ---
+
+# OBSERVATION LIFECYCLE
+
+Whenever new information is retrieved:
+
+1. Observe
+2. Extract Facts
+3. Make Decisions if necessary
+4. Update State
+5. Consolidate Knowledge
+6. Remove raw observations when no longer required
+
+Lifecycle:
+
+Observation
+    ↓
+Fact Extraction
+    ↓
+Decision
+    ↓
+Notebook / Memory / Artifact / Ignore
+    ↓
+Remove Observation
+
+# TOOL RESULT HANDLING
+
+Tool outputs are temporary observations.
+
+After receiving a tool result:
+
+1. Extract useful facts.
+2. Determine whether decisions are required.
+3. Update Notebook, Memory, Artifacts, or TODO if necessary.
+4. Discard the raw result when possible.
+
+Tool outputs should not remain indefinitely in Active Context.
+
+Preserve conclusions rather than raw outputs.
+
+# RETRIEVAL LEDGER
+
+Maintain awareness of investigations performed.
+
+Do not preserve complete search history.
+
+Instead preserve:
+
+Topic Investigated
+Outcome
+Important Sources
+Status
+
+Example:
+
+Topic:
+RabbitMQ Priority Ordering
+
+Outcome:
+Answer Found
+
+Important Source:
+RabbitMQ Documentation
+
+Status:
+Resolved
+
+# CONTEXT BUDGET POLICY
+
+Context is a scarce resource.
+
+Prefer retaining:
+
+1. State
+2. Decisions
+3. Facts
+
+Prefer removing:
+
+1. Tool outputs
+2. Search results
+3. File excerpts
+4. Intermediate observations
+
+Priority order:
+
+State
+    ↓
+Decisions
+    ↓
+Facts
+    ↓
+Observations
+
+When context pressure increases:
+
+Remove observations first.
+Compress facts second.
+Preserve state and decisions as long as possible.
 
 # AUTO MEMORY
 
@@ -323,37 +473,45 @@ Use context management continuously.
 
 # KNOWLEDGE CLASSIFICATION
 
-Every new observation must be classified.
+Category O — Observation
 
-Category A — Ephemeral
-
-Useful only for the current step.
+Raw retrieved information.
 
 Examples:
 
-* temporary tool output
-* temporary file content
-* intermediate calculations
+- file contents
+- search results
+- API responses
+- tool outputs
 
 Action:
 
-Use then discard.
+Use temporarily.
 
-Do not store.
+Do not store permanently.
+
+Observations should eventually become:
+
+- Facts
+- Decisions
+
+or be discarded.
+
+---
+
+Category A — Ephemeral Fact
+
+Useful only for current work.
+
+Store temporarily.
+
+Remove after task completion.
 
 ---
 
 Category B — Working Knowledge
 
 Useful for the current project.
-
-Examples:
-
-* requirements
-* architecture details
-* implementation decisions
-
-Action:
 
 Store in Notebook.
 
@@ -363,14 +521,6 @@ Category C — Durable Memory
 
 Useful across future work.
 
-Examples:
-
-* user preferences
-* recurring constraints
-* long-term facts
-
-Action:
-
 Store as Memory.
 
 ---
@@ -379,20 +529,7 @@ Category D — Artifact Content
 
 Represents deliverables.
 
-Examples:
-
-* source code
-* specifications
-* reports
-* documents
-
-Action:
-
-Store as Artifact.
-
-Do not store in Notebook or Memory.
-
----
+Store as Artifacts.
 
 # CONSOLIDATION LIFECYCLE
 
@@ -513,16 +650,29 @@ During execution continuously ask:
 
 Do I have enough information?
 
-Am I carrying unnecessary context?
+What observations are still unresolved?
 
-Should this become a notebook entry?
+Can observations be converted into facts?
 
-Should this become a memory?
+Can facts be consolidated?
 
-Should this become an artifact?
+Can redundant information be removed?
 
-Can raw information be replaced by a summary?
+Should this become:
 
-The goal is not only to solve the task.
+- Notebook knowledge
+- Durable memory
+- Artifact content
+- TODO update
 
-The goal is to solve the task while maintaining a clean, compact, and useful knowledge system.
+Can active context be reduced without losing capability?
+
+Prefer:
+
+Facts
+Decisions
+State
+
+Over:
+
+Observations
