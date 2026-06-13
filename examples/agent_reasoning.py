@@ -161,8 +161,8 @@ async def main() -> None:
     context = await orchestrator.run_task(
         task=task,
         config=config,
-        max_steps=6,
-        max_active_observations=3,
+        max_steps=10,
+        max_active_observations=5,
         auto_memory=[
             "Project root is /app",
             "The framework is called rh_cognitv",
