@@ -80,11 +80,21 @@ class AgentToolCallFinished(AgentEvent):
 
 
 class AgentStepCompleted(AgentEvent):
-    """Emitted when a reasoning step completes."""
+    """Emitted when a reasoning step completes.
+
+    ``tokens_prompt``, ``tokens_completion``, ``tokens_total`` and
+    ``duration_ms`` reflect the LLM call that drove this step.
+    They are ``None`` when no LLM call was made (e.g. a no-op step).
+    """
 
     type: Literal["agent_step_completed"] = "agent_step_completed"
     step_index: int
     status: str
+    # LLM telemetry for this step
+    tokens_prompt: int | None = None
+    tokens_completion: int | None = None
+    tokens_total: int | None = None
+    duration_ms: float | None = None
 
 
 class EventBus:

@@ -164,6 +164,13 @@ class AgentOrchestrator:
                 elif event.type == "stream_completed":
                     tool_calls_to_run = event.tool_calls
 
+            # Capture per-step LLM telemetry from the accumulated StreamResult
+            _step_meta            = self.llm_node.result.meta if self.llm_node.result else None
+            step_tokens_prompt     = _step_meta.tokens_used.prompt_tokens     if _step_meta else None
+            step_tokens_completion = _step_meta.tokens_used.completion_tokens if _step_meta else None
+            step_tokens_total      = _step_meta.tokens_used.total_tokens      if _step_meta else None
+            step_duration_ms       = _step_meta.duration_ms                   if _step_meta else None
+
             # Append the assistant's reply (text only) to the shared history
             messages.append(
                 Message(role="assistant", content=accumulated_text or "(no response)")
@@ -179,7 +186,13 @@ class AgentOrchestrator:
                 if all_done or step == max_steps:
                     await self._publish(
                         AgentStepCompleted(
-                            agent_id=self.agent_id, step_index=step, status="completed"
+                            agent_id=self.agent_id,
+                            step_index=step,
+                            status="completed",
+                            tokens_prompt=step_tokens_prompt,
+                            tokens_completion=step_tokens_completion,
+                            tokens_total=step_tokens_total,
+                            duration_ms=step_duration_ms,
                         )
                     )
                     break
@@ -264,7 +277,15 @@ class AgentOrchestrator:
                 messages.append(Message(role="user", content=obs_block))
 
             await self._publish(
-                AgentStepCompleted(agent_id=self.agent_id, step_index=step, status="success")
+                AgentStepCompleted(
+                    agent_id=self.agent_id,
+                    step_index=step,
+                    status="success",
+                    tokens_prompt=step_tokens_prompt,
+                    tokens_completion=step_tokens_completion,
+                    tokens_total=step_tokens_total,
+                    duration_ms=step_duration_ms,
+                )
             )
 
         return context

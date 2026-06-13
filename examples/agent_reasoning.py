@@ -106,7 +106,13 @@ def make_trace_subscriber(bus: EventBus) -> None:
         print(f"{CYAN}📋 TODO: {' | '.join(steps_summary)}{RESET}")
 
     def on_step_done(e: AgentStepCompleted) -> None:
-        print(f"{GREEN}✅ STEP {e.step_index} completed — status: {e.status}{RESET}")
+        tokens_part = ""
+        if e.tokens_total is not None:
+            tokens_part = (
+                f"  │  🪙 {e.tokens_prompt}↑ {e.tokens_completion}↓ {e.tokens_total}Σ tok"
+            )
+        duration_part = f"  │  ⏱ {e.duration_ms:.0f} ms" if e.duration_ms is not None else ""
+        print(f"{GREEN}✅ STEP {e.step_index} [{e.status}]{tokens_part}{duration_part}{RESET}")
 
     bus.subscribe(AgentStepStarted,    on_step_started)
     bus.subscribe(AgentThoughtDelta,   on_thought)
