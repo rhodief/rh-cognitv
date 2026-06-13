@@ -117,14 +117,14 @@ async def test_get_default_context_tools() -> None:
     tools = get_default_context_tools(context)
     tools_map = {t.name: t for t in tools}
 
-    assert "todo.create" in tools_map
-    assert "todo.update" in tools_map
-    assert "notebook.append" in tools_map
-    assert "context.extract_facts" in tools_map
-    assert "context.make_decision" in tools_map
+    assert "todo__create" in tools_map
+    assert "todo__update" in tools_map
+    assert "notebook__append" in tools_map
+    assert "context__extract_facts" in tools_map
+    assert "context__make_decision" in tools_map
 
-    # Test todo.create
-    res = await tools_map["todo.create"].run(description="First step")
+    # Test todo__create
+    res = await tools_map["todo__create"].run(description="First step")
     assert "Created TODO task" in res.output
     assert len(context.todo.steps) == 1
     step_id = context.todo.steps[0].id
@@ -132,24 +132,24 @@ async def test_get_default_context_tools() -> None:
     assert context.todo.steps[0].status == "pending"
 
     # Test todo.update
-    res = await tools_map["todo.update"].run(item_id=step_id, status="done")
+    res = await tools_map["todo__update"].run(item_id=step_id, status="done")
     assert "Updated TODO task" in res.output
     assert context.todo.steps[0].status == "done"
 
     # Test notebook.append
-    res = await tools_map["notebook.append"].run(content="Some knowledge")
+    res = await tools_map["notebook__append"].run(content="Some knowledge")
     assert "Appended knowledge" in res.output
     assert "Some knowledge" in context.notebook_entries
 
     # Test context.extract_facts
-    res = await tools_map["context.extract_facts"].run(facts=["Fact A", "Fact B"])
+    res = await tools_map["context__extract_facts"].run(facts=["Fact A", "Fact B"])
     assert "Extracted facts" in res.output
     assert len(context.recent_facts) == 2
     assert context.recent_facts[0].content == "Fact A"
     assert context.recent_facts[1].content == "Fact B"
 
     # Test context.make_decision
-    res = await tools_map["context.make_decision"].run(content="Use PostgreSQL", reasoning="Scale")
+    res = await tools_map["context__make_decision"].run(content="Use PostgreSQL", reasoning="Scale")
     assert "Recorded decision" in res.output
     assert len(context.pending_decisions) == 1
     assert context.pending_decisions[0].content == "Use PostgreSQL"

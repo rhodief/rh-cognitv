@@ -43,7 +43,7 @@ def function_node_to_tool_definition(node: FunctionNode) -> ToolDefinition:
         default = param.default if param.default is not inspect.Parameter.empty else ...
         fields[param_name] = (annotation, default)
 
-    model_name = f"{node.name.replace('.', '_')}_args"
+    model_name = f"{node.name.replace('__', '_').replace('.', '_')}_args"
     params_model = create_model(model_name, **fields)
     return ToolDefinition(
         name=node.name,
@@ -82,12 +82,19 @@ class AgentOrchestrator:
         auto_memory: list[str] | None = None,
     ) -> ActiveContext:
         """Runs the reasoning loop until the task is complete or max_steps is reached."""
+        import json as _json
+
         context = ActiveContext(
             task=task,
             todo=TodoState(goal=task, steps=[]),
             auto_memory=auto_memory or [],
             max_active_observations=max_active_observations,
         )
+
+        # Persistent multi-turn history shared across all steps.
+        # Initialised on step 1 then grown in-place; system prompt is refreshed
+        # at the start of each step so the agent always sees current context state.
+        messages: list[Message] = []
 
         for step in range(1, max_steps + 1):
             await self._publish(AgentStepStarted(agent_id=self.agent_id, step_index=step))
@@ -101,23 +108,43 @@ class AgentOrchestrator:
             # Enforce hygiene on context
             context.apply_hygiene()
 
-            # Compile prompt
+            # Compile a fresh system prompt with the latest context state
             prompt_content = context.format_context()
-
             system_prompt = (
                 f"{prompt_content}\n\n"
-                "You are an autonomous agent operating according to the system specification above. "
-                "Review the ACTIVE TASK, ACTIVE CONTEXT, and the TODO list.\n"
-                "Execute the next step using your capabilities (tools).\n"
-                "If you need to make plans, update tasks, extract facts, or log decisions, use the context capabilities.\n"
-                "Always call at least one tool per step if the task is not yet fully completed. "
-                "If the task is fully complete and all TODO items are marked as 'done', do not call any tools and summarize your findings."
+                "## Role\n"
+                "You are an autonomous reasoning agent. "
+                "You work step by step, thinking out loud **in plain text** before you invoke any tool.\n\n"
+                "## How to behave each step\n"
+                "1. **Think first** — write one or more short sentences in plain text explaining what you "
+                "observe, what you intend to do next, and why. This text is visible to the user as a live "
+                "thought stream.\n"
+                "2. **Then act** — call the appropriate tool(s). You may call multiple tools in a single "
+                "step when they are independent.\n"
+                "3. **Use context tools** when you need to plan, distil knowledge, or record decisions:\n"
+                "   - `todo__create` / `todo__update` — manage the step-by-step plan.\n"
+                "   - `context__extract_facts` — distil stable facts from observations.\n"
+                "   - `context__make_decision` — record an architectural or strategic choice.\n"
+                "   - `notebook__append` — store reference material for later steps.\n"
+                "4. **Finish cleanly** — when the task is fully done and all TODO items are marked "
+                "'done', write a concise closing summary in plain text and call **no** tools.\n\n"
+                "Always prefer writing at least one sentence of reasoning text before each batch of tool "
+                "calls so the user understands your intent."
             )
 
-            messages = [
-                Message(role="system", content=system_prompt),
-                Message(role="user", content="Please proceed with the next step."),
-            ]
+            if step == 1:
+                # First step: initialise the conversation
+                messages = [
+                    Message(role="system", content=system_prompt),
+                    Message(role="user", content=f"Task: {task}\n\nPlease begin."),
+                ]
+            else:
+                # Subsequent steps: refresh the system prompt in-place (context evolved),
+                # then add a brief user nudge to keep the conversation going
+                messages[0] = Message(role="system", content=system_prompt)
+                messages.append(
+                    Message(role="user", content="Please continue with the next step.")
+                )
 
             # Stream response
             stream = self.llm_node.run(
@@ -127,28 +154,40 @@ class AgentOrchestrator:
                 tool_choice="auto",
             )
 
+            accumulated_text = ""
             tool_calls_to_run: list[ToolCallResult] = []
 
             async for event in stream:
-                # Dispatch stream thought delta events
                 if event.type == "stream_delta" and event.text:
+                    accumulated_text += event.text
                     await self._publish(AgentThoughtDelta(agent_id=self.agent_id, text=event.text))
                 elif event.type == "stream_completed":
                     tool_calls_to_run = event.tool_calls
 
+            # Append the assistant's reply (text only) to the shared history
+            messages.append(
+                Message(role="assistant", content=accumulated_text or "(no response)")
+            )
+
             # Execute tool calls if any
             if not tool_calls_to_run:
-                # No tool calls: stop loop if todo is complete (or if the agent decided not to take action)
+                # Only stop if the task is truly done (all todos marked done),
+                # or this is the final allowed step.
                 all_done = len(context.todo.steps) > 0 and all(
                     s.status == "done" for s in context.todo.steps
                 )
-                if all_done or step > 1:
+                if all_done or step == max_steps:
                     await self._publish(
                         AgentStepCompleted(
                             agent_id=self.agent_id, step_index=step, status="completed"
                         )
                     )
                     break
+
+            # Collect all tool results for this step and append as a single
+            # user-role observation block (avoids the provider's strict
+            # tool_calls ↔ tool-role pairing constraint)
+            tool_results: list[str] = []
 
             for call in tool_calls_to_run:
                 tool_name = call.tool_name
@@ -166,7 +205,6 @@ class AgentOrchestrator:
 
                 handler = tools_map.get(tool_name)
                 if handler is not None:
-                    # Run tool
                     res = await handler.run(**arguments)
                     output = str(res.output) if res.output is not None else ""
                     error = res.error
@@ -185,29 +223,32 @@ class AgentOrchestrator:
                     )
                 )
 
+                # Accumulate for the batched observation message
+                result_line = f"[{tool_name}] → {output if not error else f'ERROR: {error}'}"
+                tool_results.append(result_line)
+
                 # Store tool result as observation in context
                 obs_content = output if not error else f"Error executing tool: {error}"
                 context.recent_observations.append(
                     Observation(content=obs_content, source=tool_name)
                 )
 
-                # Publish updates if context was mutated via default tools
-                if tool_name == "context.extract_facts" and not error:
-                    # Publish facts extracted
+                # Publish rich events for context mutations
+                if tool_name == "context__extract_facts" and not error:
                     for fact in context.recent_facts[-len(arguments.get("facts", [])) :]:
                         await self._publish(
                             AgentFactExtracted(
                                 agent_id=self.agent_id, fact_id=fact.id, content=fact.content
                             )
                         )
-                elif tool_name == "context.make_decision" and not error:
+                elif tool_name == "context__make_decision" and not error:
                     dec = context.pending_decisions[-1]
                     await self._publish(
                         AgentDecisionMade(
                             agent_id=self.agent_id, decision_id=dec.id, content=dec.content
                         )
                     )
-                elif tool_name in ("todo.create", "todo.update") and not error:
+                elif tool_name in ("todo__create", "todo__update") and not error:
                     await self._publish(
                         AgentTodoUpdated(
                             agent_id=self.agent_id,
@@ -215,6 +256,12 @@ class AgentOrchestrator:
                             steps=[s.model_dump() for s in context.todo.steps],
                         )
                     )
+
+            # Append all tool results from this step as a single user-role message
+            # so the model sees a clean observations block for the next step
+            if tool_results:
+                obs_block = "Tool results from this step:\n" + "\n".join(tool_results)
+                messages.append(Message(role="user", content=obs_block))
 
             await self._publish(
                 AgentStepCompleted(agent_id=self.agent_id, step_index=step, status="success")

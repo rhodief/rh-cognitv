@@ -122,6 +122,10 @@ def make_trace_subscriber(bus: EventBus) -> None:
 
 
 async def main() -> None:
+    # Always resolve paths relative to the project root, not the examples dir
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    os.chdir(project_root)
+
     adapter   = make_adapter()
     llm_node  = LLMStreamNode(adapter)
     config    = LLMConfig(model=chat_model(), temperature=0.0, max_tokens=1024)
@@ -144,9 +148,12 @@ async def main() -> None:
     )
 
     task = (
-        "Explore the project structure. "
-        "List the top-level directory, read the README.md file, "
-        "extract key facts about the project, and summarise what you found."
+        "Explore the /app project structure. "
+        "First call list_dir('/app') to see the top-level directory. "
+        "Then call read_file('/app/README.md') to read the README. "
+        "After reading, call context__extract_facts to distil 3-5 key facts about the project. "
+        "Call context__make_decision to record which module seems most important. "
+        "Finally, call todo__create to add a task 'Write API docs' and then todo__update to mark it done."
     )
 
     print(f"\n🚀  TASK: {task}\n")

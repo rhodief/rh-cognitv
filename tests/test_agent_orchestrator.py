@@ -57,7 +57,7 @@ async def test_agent_orchestrator_loop() -> None:
                 StreamToolCallDelta(
                     index=0,
                     call_id="call-1",
-                    tool_name="todo.create",
+                    tool_name="todo__create",
                     arguments_delta='{"description": "Read config"}',
                 )
             ]
@@ -88,7 +88,7 @@ async def test_agent_orchestrator_loop() -> None:
                 StreamToolCallDelta(
                     index=0,
                     call_id="call-3",
-                    tool_name="context.extract_facts",
+                    tool_name="context__extract_facts",
                     arguments_delta='{"facts": ["Port is 8080"]}',
                 )
             ]
@@ -101,7 +101,7 @@ async def test_agent_orchestrator_loop() -> None:
                 StreamToolCallDelta(
                     index=1,
                     call_id="call-4",
-                    tool_name="todo.update",
+                    tool_name="todo__update",
                     arguments_delta='{"item_id": "dummy-id", "status": "done"}',
                 )
             ]
