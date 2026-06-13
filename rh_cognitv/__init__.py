@@ -67,6 +67,30 @@ from rh_cognitv.nodes.llm.types import (
     ToolDefinition,
     normalize_prompt,
 )
+from rh_cognitv.event_bus import (
+    EventBus,
+    AgentEvent,
+    AgentStepStarted,
+    AgentThoughtDelta,
+    AgentFactExtracted,
+    AgentDecisionMade,
+    AgentTodoUpdated,
+    AgentToolCallStarted,
+    AgentToolCallFinished,
+    AgentStepCompleted,
+)
+from rh_cognitv.nodes.function_node import FunctionNode, FunctionResult
+from rh_cognitv.agents.orchestrator import AgentOrchestrator
+from rh_cognitv.agents.context import (
+    ActiveContext,
+    TodoState,
+    TodoItem,
+    Observation,
+    Fact,
+    Decision,
+    RetrievalEntry,
+    get_default_context_tools,
+)
 
 __version__ = "0.0.0b0"
 
@@ -78,6 +102,8 @@ __all__ = [
     "LLMStreamNode",
     "LLMStructuredNode",
     "LLMEmbeddingNode",
+    "FunctionNode",
+    "FunctionResult",
     # types
     "Message",
     "LLMConfig",
@@ -111,4 +137,26 @@ __all__ = [
     "StreamTextDelta",
     "StreamCompleted",
     "StreamErrorEvent",
+    # event bus
+    "EventBus",
+    "AgentEvent",
+    "AgentStepStarted",
+    "AgentThoughtDelta",
+    "AgentFactExtracted",
+    "AgentDecisionMade",
+    "AgentTodoUpdated",
+    "AgentToolCallStarted",
+    "AgentToolCallFinished",
+    "AgentStepCompleted",
+    # agents
+    "AgentOrchestrator",
+    "ActiveContext",
+    "TodoState",
+    "TodoItem",
+    "Observation",
+    "Fact",
+    "Decision",
+    "RetrievalEntry",
+    "get_default_context_tools",
 ]
+
