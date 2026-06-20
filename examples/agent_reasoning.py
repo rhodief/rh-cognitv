@@ -162,8 +162,7 @@ async def main() -> None:
     task = (
         "Explore the /app project and produce a short knowledge summary of what it is. "
         "Inspect the top-level directory and read the README to understand the project, "
-        "then capture the key facts, decide which module appears most important, and keep "
-        "your TODO plan up to date as you go."
+        "then capture the key facts, decide which module appears most important."        
     )
 
     print(f"\n🚀  TASK: {task}\n")
