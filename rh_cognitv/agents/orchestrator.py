@@ -168,23 +168,32 @@ class AgentOrchestrator:
                 "`external.<name>` identifier as listed in your tool schema.\n\n"
                 "## How to operate each step\n"
                 "1. **Think first** — write one or two short plain-text sentences explaining what you "
-                "observe and what you intend to do next. This text is streamed live to the user.\n"
-                "2. **Then act** — call the tool(s) you need. Independent calls may be batched in one step.\n\n"
+                "observe and what you intend to do next. This text is streamed live to the user. (Note: If "
+                "the step requires producing a summary, report, or answer, write it directly here.)\n"
+                "2. **Then act** — call the tool(s) you need. Independent calls may be batched in one step. "
+                "Always batch planning updates (e.g., `todo.update` to `in_progress` or `done`) with "
+                "your actions or text outputs in the same step. Do not dedicate separate steps just to "
+                "update a TODO's status.\n\n"
                 "Run this loop autonomously:\n"
-                "1. **Plan** — at the start, break the task into TODO steps with `todo.create`, then mark the "
-                "step you are working on as `in_progress`.\n"
+                "1. **Plan & Start** — at the start, break the task into TODO steps with `todo.create`, and "
+                "immediately mark the first step as `in_progress` in the same turn.\n"
                 "2. **Retrieve / act** — call the relevant action tools to gather information or make changes.\n"
                 "3. **Distil** — immediately convert raw tool output into facts via `context.extract_facts` "
                 "(and `context.make_decision` when you commit to a choice). Do not re-read raw observations; "
                 "rely on the facts you extracted.\n"
                 "4. **Record** — use `notebook.append` for reference material future steps will need.\n"
-                "5. **Update the plan** — mark finished steps `done` with `todo.update` and start the next one.\n\n"
+                "5. **Update the plan** — mark finished steps `done` with `todo.update` in the same step you "
+                "finish them and start the next one.\n\n"
                 "## Context hygiene\n"
                 "Your active context is a scarce resource and raw observations are pruned automatically.\n"
                 "- Prefer Facts, Decisions, and TODO State over raw observations.\n"
                 "- After reading something, extract the conclusion as a fact and move on — never depend on "
                 "raw tool output staying in context.\n"
-                "- Avoid duplicate notebook entries, facts, or decisions; update your plan instead of repeating work.\n\n"
+                "- Avoid duplicate notebook entries, facts, or decisions; update your plan instead of repeating work.\n"
+                "- **CRITICAL**: Do not repeat information (such as previously generated summaries or content) "
+                "across multiple turns. If you already wrote a summary or answer in a previous turn, do not "
+                "repeat it in subsequent steps or in the final closing summary; instead, write a short completion "
+                "message referencing it.\n\n"
                 "## Finishing\n"
                 "When every TODO item is `done` and the objective is met, write a concise closing summary in "
                 "plain text and call **no** tools. Do not stop while TODO items are still `pending` or `in_progress`."
@@ -201,8 +210,22 @@ class AgentOrchestrator:
                 # Subsequent steps: refresh the system prompt in-place (context evolved),
                 # then add a brief user nudge to keep the conversation going
                 messages[0] = Message(role="system", content=system_prompt)
+                
+                # Check for unfinished TODO items to nudge specifically if agent called no tools
+                # but left tasks unfinished.
+                unfinished_tasks = [s.description for s in context.todo.steps if s.status != "done"]
+                if unfinished_tasks:
+                    nudge_content = (
+                        "Please continue with the next step. Note that the following TODO tasks "
+                        f"are still not marked 'done': {unfinished_tasks}. If you have completed them, "
+                        "you must update their status to 'done' using todo.update. Do not repeat "
+                        "previously outputted summaries or facts."
+                    )
+                else:
+                    nudge_content = "Please continue with the next step. Do not repeat previously outputted summaries or facts."
+                
                 messages.append(
-                    Message(role="user", content="Please continue with the next step.")
+                    Message(role="user", content=nudge_content)
                 )
 
             # Stream response

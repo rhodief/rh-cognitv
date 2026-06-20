@@ -197,11 +197,30 @@ def _map_tool_config(tool_choice: str | None) -> dict[str, Any]:
 
 
 def _response_text(response: Any) -> str:
-    """Safely read ``response.text`` (the property raises when no text parts)."""
+    """Safely read text parts from the response candidates or fallback to response.text.
+
+    This avoids triggering the google-genai SDK's warning/exception when there are
+    non-text parts (e.g. function calls) in the response chunk or candidate.
+    """
+    candidates = getattr(response, "candidates", None)
+    if candidates:
+        content = getattr(candidates[0], "content", None)
+        if content is not None:
+            parts = getattr(content, "parts", None)
+            if parts:
+                texts = []
+                for part in parts:
+                    text_val = getattr(part, "text", None)
+                    if text_val is not None and not getattr(part, "thought", False):
+                        texts.append(text_val)
+                if texts:
+                    return "".join(texts)
+                return ""
     try:
         return response.text or ""
     except Exception:
         return ""
+
 
 
 def _extract_thinking(chunk: Any) -> str | None:

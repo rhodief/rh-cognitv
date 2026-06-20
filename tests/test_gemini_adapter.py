@@ -37,6 +37,7 @@ from rh_cognitv.nodes.llm_adapters.gemini_adapter import (
     _to_contents,
     _to_gemini_tool,
     map_gemini_exception,
+    _response_text,
 )
 
 
@@ -186,6 +187,31 @@ class TestHelpers:
 
     def test_system_instruction_none_when_absent(self):
         assert _system_instruction([Message(role="user", content="x")]) is None
+
+    def test_response_text_with_candidates(self):
+        # Case 1: normal text part
+        part1 = SimpleNamespace(text="hello", thought=False)
+        content = SimpleNamespace(parts=[part1])
+        candidate = SimpleNamespace(content=content)
+        resp = SimpleNamespace(candidates=[candidate])
+        assert _response_text(resp) == "hello"
+
+        # Case 2: text + thought + function call parts
+        part_text = SimpleNamespace(text="actual text", thought=False)
+        part_thought = SimpleNamespace(text="internal thought", thought=True)
+        part_func = SimpleNamespace(text=None, function_call=SimpleNamespace(name="foo", args={}))
+        content = SimpleNamespace(parts=[part_text, part_thought, part_func])
+        candidate = SimpleNamespace(content=content)
+        resp = SimpleNamespace(candidates=[candidate])
+        # It should only extract the non-thought text part
+        assert _response_text(resp) == "actual text"
+
+        # Case 3: only function call part
+        content = SimpleNamespace(parts=[part_func])
+        candidate = SimpleNamespace(content=content)
+        resp = SimpleNamespace(candidates=[candidate])
+        assert _response_text(resp) == ""
+
 
     def test_build_config_from_llm_config(self):
         cfg = LLMConfig(
