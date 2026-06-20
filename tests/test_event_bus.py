@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import pytest
 
-from rh_cognitv.event_bus import EventBus, AgentStepStarted, AgentThoughtDelta
+from rh_cognitv.event_bus import EventBus, AgentStepStarted, AgentTextDelta, AgentThoughtDelta
 
 
 @pytest.mark.asyncio
@@ -55,28 +55,35 @@ async def test_event_bus_wildcard_subscription() -> None:
     event_bus = EventBus()
     received_events: list[Any] = []
     step_received = asyncio.Event()
+    text_received = asyncio.Event()
     thought_received = asyncio.Event()
 
     async def wildcard_handler(event: Any) -> None:
         received_events.append(event)
         if isinstance(event, AgentStepStarted):
             step_received.set()
+        elif isinstance(event, AgentTextDelta):
+            text_received.set()
         elif isinstance(event, AgentThoughtDelta):
             thought_received.set()
 
     event_bus.subscribe("*", wildcard_handler)
 
     step_event = AgentStepStarted(agent_id="test", step_index=1)
+    text_event = AgentTextDelta(agent_id="test", text="regular output")
     thought_event = AgentThoughtDelta(agent_id="test", text="thinking")
 
     await event_bus.publish(step_event)
+    await event_bus.publish(text_event)
     await event_bus.publish(thought_event)
 
     await asyncio.wait_for(step_received.wait(), timeout=1.0)
+    await asyncio.wait_for(text_received.wait(), timeout=1.0)
     await asyncio.wait_for(thought_received.wait(), timeout=1.0)
 
-    assert len(received_events) == 2
+    assert len(received_events) == 3
     assert any(isinstance(e, AgentStepStarted) for e in received_events)
+    assert any(isinstance(e, AgentTextDelta) for e in received_events)
     assert any(isinstance(e, AgentThoughtDelta) for e in received_events)
 
 

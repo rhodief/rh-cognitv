@@ -39,6 +39,7 @@ from rh_cognitv.nodes.llm.events import (
     StreamEvent,
     StreamStarted,
     StreamTextDelta,
+    StreamThinkingDelta,
 )
 from rh_cognitv.nodes.llm.structured_node import validate_tool_calls
 from rh_cognitv.nodes.llm.types import (
@@ -201,16 +202,19 @@ class LLMStreamNode(BaseNode[AsyncGenerator[StreamEvent, None]]):
         yield started
 
         text_parts: list[str] = []
+        thinking_parts: list[str] = []
         accumulated_object: dict[str, Any] | None = None
         tool_accumulator = _ToolCallAccumulator()
         final_usage = TokenUsage()
         final_model = config.model
 
         batch_text: list[str] = []
+        batch_thinking: list[str] = []
         batch_object: dict[str, Any] | None = None
         batch_tool_deltas: list[StreamToolCallDelta] = []
         batch_count = 0
         emit_index = 0
+        thinking_emit_index = 0
 
         start = time.perf_counter()
         try:
@@ -224,11 +228,23 @@ class LLMStreamNode(BaseNode[AsyncGenerator[StreamEvent, None]]):
 
                 has_content = (
                     delta.text is not None
+                    or delta.thinking is not None
                     or delta.object_fragment is not None
                     or delta.tool_call_deltas is not None
                 )
                 if not has_content:
                     continue
+
+                # Thinking content is emitted immediately (not batched with text)
+                if delta.thinking is not None:
+                    thinking_parts.append(delta.thinking)
+                    thinking_event = StreamThinkingDelta(
+                        text=delta.thinking,
+                        index=thinking_emit_index,
+                    )
+                    thinking_emit_index += 1
+                    await dispatch(thinking_event)
+                    yield thinking_event
 
                 if delta.text is not None:
                     text_parts.append(delta.text)
@@ -292,6 +308,7 @@ class LLMStreamNode(BaseNode[AsyncGenerator[StreamEvent, None]]):
         )
         completed = StreamCompleted(
             text="".join(text_parts),
+            thinking="".join(thinking_parts) if thinking_parts else None,
             object=accumulated_object,
             tool_calls=tool_calls,
             meta=meta,
@@ -299,6 +316,7 @@ class LLMStreamNode(BaseNode[AsyncGenerator[StreamEvent, None]]):
         if self.accumulate:
             self.result = StreamResult(
                 text=completed.text,
+                thinking=completed.thinking,
                 object=completed.object,
                 tool_calls=completed.tool_calls,
                 meta=completed.meta,

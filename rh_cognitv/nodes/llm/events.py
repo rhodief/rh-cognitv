@@ -39,11 +39,25 @@ class StreamTextDelta(BaseModel):
     index: int = 0  # sequence number of this emitted (post-batch) event
 
 
+class StreamThinkingDelta(BaseModel):
+    """Emitted for each chunk of model thinking/reasoning content.
+
+    Only produced by models that support extended thinking (e.g. Claude,
+    Gemini thinking mode). Distinct from :class:`StreamTextDelta` which
+    carries regular text output.
+    """
+
+    type: Literal["stream_thinking_delta"] = "stream_thinking_delta"
+    text: str
+    index: int = 0
+
+
 class StreamCompleted(BaseModel):
     """Emitted once, after the final delta, with consolidated metadata."""
 
     type: Literal["stream_completed"] = "stream_completed"
     text: str
+    thinking: str | None = None
     object: dict[str, Any] | None = None
     tool_calls: list[ToolCallResult] = Field(default_factory=list)
     meta: LLMResultMeta
@@ -60,7 +74,7 @@ class StreamErrorEvent(BaseModel):
 
 
 StreamEvent = Annotated[
-    Union[StreamStarted, StreamTextDelta, StreamCompleted, StreamErrorEvent],
+    Union[StreamStarted, StreamTextDelta, StreamThinkingDelta, StreamCompleted, StreamErrorEvent],
     Field(discriminator="type"),
 ]
 """Discriminated union of all canonical stream events."""

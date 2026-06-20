@@ -19,6 +19,7 @@ from rh_cognitv.agents.context import (
 from rh_cognitv.event_bus import (
     EventBus,
     AgentStepStarted,
+    AgentTextDelta,
     AgentThoughtDelta,
     AgentFactExtracted,
     AgentDecisionMade,
@@ -105,13 +106,17 @@ class AgentOrchestrator:
             tools_map = {t.name: t for t in all_tools}
             tool_definitions = [function_node_to_tool_definition(t) for t in all_tools]
 
+            # Track which tools are internal (framework context tools) vs
+            # external (user-provided action tools) so the bus events carry
+            # a classification that frontends can use for rendering.
+            internal_tool_names = {t.name for t in ctx_tools}
+
             # Enforce hygiene on context
             context.apply_hygiene()
 
             # Compile a fresh system prompt with the latest context state
             prompt_content = context.format_context()
             system_prompt = (
-                f"{prompt_content}\n\n"
                 "## Role\n"
                 "You are an autonomous reasoning agent. "
                 "You work step by step, thinking out loud **in plain text** before you invoke any tool.\n\n"
@@ -130,8 +135,9 @@ class AgentOrchestrator:
                 "'done', write a concise closing summary in plain text and call **no** tools.\n\n"
                 "Always prefer writing at least one sentence of reasoning text before each batch of tool "
                 "calls so the user understands your intent."
+                f"\n\n{prompt_content}"
             )
-
+            
             if step == 1:
                 # First step: initialise the conversation
                 messages = [
@@ -160,6 +166,8 @@ class AgentOrchestrator:
             async for event in stream:
                 if event.type == "stream_delta" and event.text:
                     accumulated_text += event.text
+                    await self._publish(AgentTextDelta(agent_id=self.agent_id, text=event.text))
+                elif event.type == "stream_thinking_delta" and event.text:
                     await self._publish(AgentThoughtDelta(agent_id=self.agent_id, text=event.text))
                 elif event.type == "stream_completed":
                     tool_calls_to_run = event.tool_calls
@@ -206,6 +214,7 @@ class AgentOrchestrator:
                 tool_name = call.tool_name
                 arguments = call.arguments
                 call_id = call.call_id
+                tool_kind = "internal" if tool_name in internal_tool_names else "external"
 
                 await self._publish(
                     AgentToolCallStarted(
@@ -213,6 +222,7 @@ class AgentOrchestrator:
                         tool_name=tool_name,
                         arguments=arguments,
                         call_id=call_id,
+                        tool_kind=tool_kind,
                     )
                 )
 
@@ -233,6 +243,7 @@ class AgentOrchestrator:
                         output=output,
                         error=error,
                         call_id=call_id,
+                        tool_kind=tool_kind,
                     )
                 )
 

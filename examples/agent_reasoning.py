@@ -27,6 +27,7 @@ from rh_cognitv import (
     EventBus,
     FunctionNode,
     AgentStepStarted,
+    AgentTextDelta,
     AgentThoughtDelta,
     AgentFactExtracted,
     AgentDecisionMade,
@@ -81,12 +82,16 @@ def make_trace_subscriber(bus: EventBus) -> None:
         print(f"\n{CYAN}{'─' * 60}{RESET}")
         print(f"{CYAN}▶  STEP {e.step_index}{RESET}")
 
-    async def on_thought(e: AgentThoughtDelta) -> None:
+    async def on_text(e: AgentTextDelta) -> None:
         print(f"{DIM}{e.text}{RESET}", end="", flush=True)
+
+    async def on_thought(e: AgentThoughtDelta) -> None:
+        print(f"{MAGENTA}💭 {e.text}{RESET}", end="", flush=True)
 
     def on_tool_start(e: AgentToolCallStarted) -> None:
         args = ", ".join(f"{k}={v!r}" for k, v in e.arguments.items())
-        print(f"\n{YELLOW}⚙  TOOL CALL → {e.tool_name}({args}){RESET}")
+        kind_tag = f" [{e.tool_kind}]" if e.tool_kind else ""
+        print(f"\n{YELLOW}⚙  TOOL CALL{kind_tag} → {e.tool_name}({args}){RESET}")
 
     def on_tool_finish(e: AgentToolCallFinished) -> None:
         if e.error:
@@ -115,6 +120,7 @@ def make_trace_subscriber(bus: EventBus) -> None:
         print(f"{GREEN}✅ STEP {e.step_index} [{e.status}]{tokens_part}{duration_part}{RESET}")
 
     bus.subscribe(AgentStepStarted,    on_step_started)
+    bus.subscribe(AgentTextDelta,      on_text)
     bus.subscribe(AgentThoughtDelta,   on_thought)
     bus.subscribe(AgentToolCallStarted,  on_tool_start)
     bus.subscribe(AgentToolCallFinished, on_tool_finish)

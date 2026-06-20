@@ -204,6 +204,29 @@ def _response_text(response: Any) -> str:
         return ""
 
 
+def _extract_thinking(chunk: Any) -> str | None:
+    """Extract thinking/reasoning text from a Gemini response chunk.
+
+    Gemini thinking mode exposes model reasoning via the ``thought`` attribute
+    on individual content parts.  We concatenate all thought parts found in the
+    first candidate's content.
+    """
+    candidates = getattr(chunk, "candidates", None)
+    if not candidates:
+        return None
+    content = getattr(candidates[0], "content", None)
+    if content is None:
+        return None
+    parts = getattr(content, "parts", None)
+    if not parts:
+        return None
+    thoughts: list[str] = []
+    for part in parts:
+        if getattr(part, "thought", False) and getattr(part, "text", None):
+            thoughts.append(part.text)
+    return "".join(thoughts) if thoughts else None
+
+
 class GeminiAdapter(TextAdapter, StreamAdapter, StructuredAdapter, EmbeddingAdapter):
     """Google Gemini-backed adapter.
 
@@ -285,6 +308,7 @@ class GeminiAdapter(TextAdapter, StreamAdapter, StructuredAdapter, EmbeddingAdap
             )
             async for chunk in stream:
                 text = _response_text(chunk) or None
+                thinking = _extract_thinking(chunk)
 
                 tool_call_deltas: list[StreamToolCallDelta] | None = None
                 raw_calls = getattr(chunk, "function_calls", None) or []
@@ -307,6 +331,7 @@ class GeminiAdapter(TextAdapter, StreamAdapter, StructuredAdapter, EmbeddingAdap
 
                 if (
                     text is None
+                    and thinking is None
                     and tool_call_deltas is None
                     and usage is None
                     and model is None
@@ -314,6 +339,7 @@ class GeminiAdapter(TextAdapter, StreamAdapter, StructuredAdapter, EmbeddingAdap
                     continue
                 yield StreamDelta(
                     text=text,
+                    thinking=thinking,
                     tool_call_deltas=tool_call_deltas,
                     usage=usage,
                     model=model,

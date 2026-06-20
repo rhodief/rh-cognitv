@@ -169,12 +169,30 @@ async def test_agent_orchestrator_loop() -> None:
     # Since K=2 is applied at the beginning of each step, at Step 4 it has pruned to 2 observations.
     assert len(final_context.recent_observations) <= 2
 
-    # Let's verify event bus has received step, thought, tool, and completion events
+    # Let's verify event bus has received step, text, tool, and completion events
     await asyncio.sleep(0.05)
     assert len(published_events) > 0
     assert any(e.type == "agent_step_started" for e in published_events)
-    assert any(e.type == "agent_thought_delta" for e in published_events)
+    assert any(e.type == "agent_text_delta" for e in published_events)
     assert any(e.type == "agent_tool_call_started" for e in published_events)
     assert any(e.type == "agent_tool_call_finished" for e in published_events)
     assert any(e.type == "agent_fact_extracted" for e in published_events)
     assert any(e.type == "agent_step_completed" for e in published_events)
+
+    # Verify tool_kind classification: context tools are "internal",
+    # user-provided action tools are "external".
+    tool_started_events = [e for e in published_events if e.type == "agent_tool_call_started"]
+    for ev in tool_started_events:
+        if ev.tool_name in ("todo__create", "todo__update", "context__extract_facts",
+                            "context__make_decision", "notebook__append"):
+            assert ev.tool_kind == "internal", f"{ev.tool_name} should be internal"
+        elif ev.tool_name == "read_file":
+            assert ev.tool_kind == "external", f"{ev.tool_name} should be external"
+
+    tool_finished_events = [e for e in published_events if e.type == "agent_tool_call_finished"]
+    for ev in tool_finished_events:
+        if ev.tool_name in ("todo__create", "todo__update", "context__extract_facts",
+                            "context__make_decision", "notebook__append"):
+            assert ev.tool_kind == "internal", f"{ev.tool_name} should be internal"
+        elif ev.tool_name == "read_file":
+            assert ev.tool_kind == "external", f"{ev.tool_name} should be external"

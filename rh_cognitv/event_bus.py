@@ -12,6 +12,9 @@ from collections.abc import Callable
 from typing import Any, Literal
 from pydantic import BaseModel, Field
 
+ToolKind = Literal["internal", "external"]
+"""Classifies a tool as framework-internal or user-provided (external)."""
+
 
 class AgentEvent(BaseModel):
     """Base model for all agent-related events."""
@@ -29,9 +32,21 @@ class AgentStepStarted(AgentEvent):
 
 
 class AgentThoughtDelta(AgentEvent):
-    """Emitted as reasoning text is streamed from the model."""
+    """Emitted as model thinking/reasoning content is streamed.
+
+    Only produced by models that support extended thinking (e.g. Claude
+    extended thinking, Gemini thinking mode). For regular text output,
+    see :class:`AgentTextDelta`.
+    """
 
     type: Literal["agent_thought_delta"] = "agent_thought_delta"
+    text: str
+
+
+class AgentTextDelta(AgentEvent):
+    """Emitted as regular (non-thinking) text is streamed from the model."""
+
+    type: Literal["agent_text_delta"] = "agent_text_delta"
     text: str
 
 
@@ -66,6 +81,7 @@ class AgentToolCallStarted(AgentEvent):
     tool_name: str
     arguments: dict[str, Any]
     call_id: str | None = None
+    tool_kind: ToolKind = "external"
 
 
 class AgentToolCallFinished(AgentEvent):
@@ -77,6 +93,7 @@ class AgentToolCallFinished(AgentEvent):
     output: str
     error: str | None = None
     call_id: str | None = None
+    tool_kind: ToolKind = "external"
 
 
 class AgentStepCompleted(AgentEvent):

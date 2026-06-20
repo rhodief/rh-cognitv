@@ -49,6 +49,7 @@ from rh_cognitv.nodes.llm.events import (
     StreamEvent,
     StreamStarted,
     StreamTextDelta,
+    StreamThinkingDelta,
 )
 from rh_cognitv.nodes.llm.types import (
     EmbeddingRequest,
@@ -69,8 +70,10 @@ from rh_cognitv.nodes.llm.types import (
 )
 from rh_cognitv.event_bus import (
     EventBus,
+    ToolKind,
     AgentEvent,
     AgentStepStarted,
+    AgentTextDelta,
     AgentThoughtDelta,
     AgentFactExtracted,
     AgentDecisionMade,
@@ -135,12 +138,15 @@ __all__ = [
     "StreamEvent",
     "StreamStarted",
     "StreamTextDelta",
+    "StreamThinkingDelta",
     "StreamCompleted",
     "StreamErrorEvent",
     # event bus
     "EventBus",
+    "ToolKind",
     "AgentEvent",
     "AgentStepStarted",
+    "AgentTextDelta",
     "AgentThoughtDelta",
     "AgentFactExtracted",
     "AgentDecisionMade",

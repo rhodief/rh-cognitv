@@ -93,13 +93,16 @@ class StreamDelta(BaseModel):
     """An incremental chunk produced during streaming.
 
     ``text`` / ``object_fragment`` carry incremental content and
-    ``tool_call_deltas`` carries incremental tool-call fragments. ``usage`` and
+    ``tool_call_deltas`` carries incremental tool-call fragments. ``thinking``
+    carries model thinking/reasoning content (e.g. Claude extended thinking,
+    Gemini thinking mode) — distinct from regular ``text``. ``usage`` and
     ``model`` are optional trailing metadata that providers attach to the final
     chunk (e.g. OpenAI with ``stream_options={"include_usage": True}``); the
     node uses them to build the consolidated :class:`StreamResult` meta.
     """
 
     text: str | None = None
+    thinking: str | None = None
     object_fragment: dict[str, Any] | None = None
     tool_call_deltas: list[StreamToolCallDelta] | None = None
     usage: TokenUsage | None = None
@@ -111,9 +114,11 @@ class StreamResult(BaseModel):
 
     ``tool_calls`` holds the reconstructed tool calls when the stream was run
     with tools (DD-07); it is an empty list for plain text/object streams.
+    ``thinking`` holds the accumulated model thinking/reasoning content (if any).
     """
 
     text: str
+    thinking: str | None = None
     object: dict[str, Any] | None = None
     tool_calls: list["ToolCallResult"] = Field(default_factory=list)
     meta: LLMResultMeta

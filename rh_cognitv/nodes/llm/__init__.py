@@ -23,6 +23,7 @@ from rh_cognitv.nodes.llm.events import (
     StreamEvent,
     StreamStarted,
     StreamTextDelta,
+    StreamThinkingDelta,
 )
 from rh_cognitv.nodes.llm.embedding_node import LLMEmbeddingNode
 from rh_cognitv.nodes.llm.stream_node import LLMStreamNode
@@ -78,6 +79,7 @@ __all__ = [
     "StreamEvent",
     "StreamStarted",
     "StreamTextDelta",
+    "StreamThinkingDelta",
     "StreamCompleted",
     "StreamErrorEvent",
     # nodes

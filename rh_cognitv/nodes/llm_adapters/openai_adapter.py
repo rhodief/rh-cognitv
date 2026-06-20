@@ -269,12 +269,17 @@ class OpenAIAdapter(TextAdapter, StreamAdapter, StructuredAdapter, EmbeddingAdap
             stream = await self._client.chat.completions.create(**payload)
             async for chunk in stream:
                 text: str | None = None
+                thinking: str | None = None
                 tool_call_deltas: list[StreamToolCallDelta] | None = None
                 choices = getattr(chunk, "choices", None) or []
                 if choices:
                     delta = getattr(choices[0], "delta", None)
                     if delta is not None:
                         text = getattr(delta, "content", None)
+                        # OpenAI-compatible APIs (including Anthropic via
+                        # OpenAI compat layer) may expose model thinking /
+                        # reasoning via a `reasoning_content` field.
+                        thinking = getattr(delta, "reasoning_content", None)
                         tool_call_deltas = _stream_tool_call_deltas(delta)
 
                 raw_usage = getattr(chunk, "usage", None)
@@ -283,6 +288,7 @@ class OpenAIAdapter(TextAdapter, StreamAdapter, StructuredAdapter, EmbeddingAdap
 
                 if (
                     text is None
+                    and thinking is None
                     and tool_call_deltas is None
                     and usage is None
                     and model is None
@@ -290,6 +296,7 @@ class OpenAIAdapter(TextAdapter, StreamAdapter, StructuredAdapter, EmbeddingAdap
                     continue
                 yield StreamDelta(
                     text=text,
+                    thinking=thinking,
                     tool_call_deltas=tool_call_deltas,
                     usage=usage,
                     model=model,
