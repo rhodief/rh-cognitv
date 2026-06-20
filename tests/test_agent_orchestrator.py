@@ -57,15 +57,15 @@ async def test_agent_orchestrator_loop() -> None:
                 StreamToolCallDelta(
                     index=0,
                     call_id="call-1",
-                    tool_name="todo__create",
+                    tool_name="todo.create",
                     arguments_delta='{"description": "Read config"}',
                 )
             ]
         ),
     ]
 
-    # Step 2: LLM says "Reading the file..." and calls external__read_file(path="config.json")
-    # (external tools are prefixed with "external__" in the LLM's tool definitions)
+    # Step 2: LLM says "Reading the file..." and calls external.read_file(path="config.json")
+    # (external tools are prefixed with "external." in the LLM's tool definitions)
     step2_deltas = [
         StreamDelta(text="Thinking: Reading the file..."),
         StreamDelta(
@@ -73,7 +73,7 @@ async def test_agent_orchestrator_loop() -> None:
                 StreamToolCallDelta(
                     index=0,
                     call_id="call-2",
-                    tool_name="external__read_file",
+                    tool_name="external.read_file",
                     arguments_delta='{"path": "config.json"}',
                 )
             ]
@@ -89,7 +89,7 @@ async def test_agent_orchestrator_loop() -> None:
                 StreamToolCallDelta(
                     index=0,
                     call_id="call-3",
-                    tool_name="context__extract_facts",
+                    tool_name="context.extract_facts",
                     arguments_delta='{"facts": ["Port is 8080"]}',
                 )
             ]
@@ -102,7 +102,7 @@ async def test_agent_orchestrator_loop() -> None:
                 StreamToolCallDelta(
                     index=1,
                     call_id="call-4",
-                    tool_name="todo__update",
+                    tool_name="todo.update",
                     arguments_delta='{"item_id": "dummy-id", "status": "done"}',
                 )
             ]
@@ -184,22 +184,22 @@ async def test_agent_orchestrator_loop() -> None:
     # user-provided action tools are "external".
     tool_started_events = [e for e in published_events if e.type == "agent_tool_call_started"]
     for ev in tool_started_events:
-        if ev.tool_name in ("todo__create", "todo__update", "context__extract_facts",
-                            "context__make_decision", "notebook__append"):
+        if ev.tool_name in ("todo.create", "todo.update", "context.extract_facts",
+                            "context.make_decision", "notebook.append"):
             assert ev.tool_kind == "internal", f"{ev.tool_name} should be internal"
         elif ev.tool_name == "read_file":
             assert ev.tool_kind == "external", f"{ev.tool_name} should be external"
 
     tool_finished_events = [e for e in published_events if e.type == "agent_tool_call_finished"]
     for ev in tool_finished_events:
-        if ev.tool_name in ("todo__create", "todo__update", "context__extract_facts",
-                            "context__make_decision", "notebook__append"):
+        if ev.tool_name in ("todo.create", "todo.update", "context.extract_facts",
+                            "context.make_decision", "notebook.append"):
             assert ev.tool_kind == "internal", f"{ev.tool_name} should be internal"
         elif ev.tool_name == "read_file":
             assert ev.tool_kind == "external", f"{ev.tool_name} should be external"
 
-    # Verify events expose the ORIGINAL unprefixed name (not "external__read_file")
+    # Verify events expose the ORIGINAL unprefixed name (not "external.read_file")
     read_file_events = [e for e in tool_started_events if e.tool_name == "read_file"]
     assert len(read_file_events) == 1, "read_file should appear without prefix"
-    assert not any(e.tool_name.startswith("external__") for e in tool_started_events), \
-        "Bus events should never expose the external__ prefix"
+    assert not any(e.tool_name.startswith("external.") for e in tool_started_events), \
+        "Bus events should never expose the external. prefix"

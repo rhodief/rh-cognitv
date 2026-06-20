@@ -44,7 +44,7 @@ def function_node_to_tool_definition(node: FunctionNode) -> ToolDefinition:
         default = param.default if param.default is not inspect.Parameter.empty else ...
         fields[param_name] = (annotation, default)
 
-    model_name = f"{node.name.replace('__', '_').replace('.', '_')}_args"
+    model_name = f"{node.name.replace('.', '_').replace('__', '_')}_args"
     params_model = create_model(model_name, **fields)
     return ToolDefinition(
         name=node.name,
@@ -101,12 +101,12 @@ class AgentOrchestrator:
             await self._publish(AgentStepStarted(agent_id=self.agent_id, step_index=step))
 
             # Build tools list for this step.
-            # External (user-provided) tools are prefixed with "external__" in
+            # External (user-provided) tools are prefixed with "external." in
             # the tool definitions sent to the LLM so they can never collide
-            # with internal context tool names (e.g. "todo__create").  The
+            # with internal context tool names (e.g. "todo.create").  The
             # prefix is stripped when emitting bus events so consumers always
             # see the original tool name + tool_kind.
-            EXTERNAL_PREFIX = "external__"
+            EXTERNAL_PREFIX = "external."
 
             ctx_tools = get_default_context_tools(context)
             internal_tool_names = {t.name for t in ctx_tools}
@@ -157,10 +157,10 @@ class AgentOrchestrator:
                 "2. **Then act** — call the appropriate tool(s). You may call multiple tools in a single "
                 "step when they are independent.\n"
                 "3. **Use context tools** when you need to plan, distil knowledge, or record decisions:\n"
-                "   - `todo__create` / `todo__update` — manage the step-by-step plan.\n"
-                "   - `context__extract_facts` — distil stable facts from observations.\n"
-                "   - `context__make_decision` — record an architectural or strategic choice.\n"
-                "   - `notebook__append` — store reference material for later steps.\n"
+                "   - `todo.create` / `todo.update` — manage the step-by-step plan.\n"
+                "   - `context.extract_facts` — distil stable facts from observations.\n"
+                "   - `context.make_decision` — record an architectural or strategic choice.\n"
+                "   - `notebook.append` — store reference material for later steps.\n"
                 "4. **Finish cleanly** — when the task is fully done and all TODO items are marked "
                 "'done', write a concise closing summary in plain text and call **no** tools.\n\n"
                 "Always prefer writing at least one sentence of reasoning text before each batch of tool "
@@ -296,21 +296,21 @@ class AgentOrchestrator:
                 )
 
                 # Publish rich events for context mutations
-                if original_name == "context__extract_facts" and not error:
+                if original_name == "context.extract_facts" and not error:
                     for fact in context.recent_facts[-len(arguments.get("facts", [])) :]:
                         await self._publish(
                             AgentFactExtracted(
                                 agent_id=self.agent_id, fact_id=fact.id, content=fact.content
                             )
                         )
-                elif original_name == "context__make_decision" and not error:
+                elif original_name == "context.make_decision" and not error:
                     dec = context.pending_decisions[-1]
                     await self._publish(
                         AgentDecisionMade(
                             agent_id=self.agent_id, decision_id=dec.id, content=dec.content
                         )
                     )
-                elif original_name in ("todo__create", "todo__update") and not error:
+                elif original_name in ("todo.create", "todo.update") and not error:
                     await self._publish(
                         AgentTodoUpdated(
                             agent_id=self.agent_id,

@@ -163,9 +163,9 @@ async def main() -> None:
         "Explore the /app project structure. "
         "First call list_dir('/app') to see the top-level directory. "
         "Then call read_file('/app/README.md') to read the README. "
-        "After reading, call context__extract_facts to distil 3-5 key facts about the project. "
-        "Call context__make_decision to record which module seems most important. "
-        "Finally, call todo__create to add a task 'Write API docs' and then todo__update to mark it done."
+        "After reading, call context.extract_facts to distil 3-5 key facts about the project. "
+        "Call context.make_decision to record which module seems most important. "
+        "Finally, call todo.create to add a task 'Write API docs' and then todo.update to mark it done."
     )
 
     print(f"\n🚀  TASK: {task}\n")

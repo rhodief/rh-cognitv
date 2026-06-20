@@ -147,11 +147,28 @@ def _token_usage(usage: Any) -> TokenUsage:
     )
 
 
+def _sanitize_tool_name(name: str) -> str:
+    """Convert canonical dot-separated tool names to OpenAI-compatible format.
+
+    OpenAI function names must match ``^[a-zA-Z0-9_-]{1,64}$``; dots are not
+    allowed.  We replace ``.`` with ``__`` at the provider boundary.
+    """
+    return name.replace(".", "__")
+
+
+def _unsanitize_tool_name(name: str) -> str:
+    """Convert OpenAI-format tool names back to canonical dot-separated names.
+
+    Reverses the transformation done by :func:`_sanitize_tool_name`.
+    """
+    return name.replace("__", ".")
+
+
 def _to_openai_tool(tool: ToolDefinition) -> dict[str, Any]:
     return {
         "type": "function",
         "function": {
-            "name": tool.name,
+            "name": _sanitize_tool_name(tool.name),
             "description": tool.description,
             "parameters": tool.parameters_model.model_json_schema(),
         },
@@ -178,6 +195,9 @@ def _stream_tool_call_deltas(delta: Any) -> list[StreamToolCallDelta] | None:
     OpenAI streams tool calls incrementally: the ``id`` / ``name`` arrive on the
     first fragment for a given ``index`` and the ``arguments`` arrive as partial
     JSON strings on subsequent fragments.
+
+    Tool names are unsanitized (``__`` → ``.``) to restore the canonical
+    dot-separated format.
     """
     raw_calls = getattr(delta, "tool_calls", None)
     if not raw_calls:
@@ -185,11 +205,13 @@ def _stream_tool_call_deltas(delta: Any) -> list[StreamToolCallDelta] | None:
     fragments: list[StreamToolCallDelta] = []
     for raw in raw_calls:
         function = getattr(raw, "function", None)
+        raw_name = getattr(function, "name", None) if function else None
+        tool_name = _unsanitize_tool_name(raw_name) if raw_name else None
         fragments.append(
             StreamToolCallDelta(
                 index=getattr(raw, "index", 0) or 0,
                 call_id=getattr(raw, "id", None),
-                tool_name=getattr(function, "name", None) if function else None,
+                tool_name=tool_name,
                 arguments_delta=getattr(function, "arguments", None)
                 if function
                 else None,
@@ -327,7 +349,7 @@ class OpenAIAdapter(TextAdapter, StreamAdapter, StructuredAdapter, EmbeddingAdap
         tool_calls: list[ToolCallResult] = []
         for raw in raw_calls:
             function = raw.function
-            name = function.name
+            name = _unsanitize_tool_name(function.name)
             raw_args = function.arguments or "{}"
             try:
                 arguments = json.loads(raw_args)

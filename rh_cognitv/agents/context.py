@@ -205,10 +205,10 @@ def get_default_context_tools(context: ActiveContext) -> list[Any]:
         return f"Recorded decision: {d.id}"
 
     return [
-        FunctionNode(todo_create,           name="todo__create"),
-        FunctionNode(todo_update,           name="todo__update"),
-        FunctionNode(notebook_append,       name="notebook__append"),
-        FunctionNode(context_extract_facts, name="context__extract_facts"),
-        FunctionNode(context_make_decision, name="context__make_decision"),
+        FunctionNode(todo_create,           name="todo.create"),
+        FunctionNode(todo_update,           name="todo.update"),
+        FunctionNode(notebook_append,       name="notebook.append"),
+        FunctionNode(context_extract_facts, name="context.extract_facts"),
+        FunctionNode(context_make_decision, name="context.make_decision"),
     ]
 
