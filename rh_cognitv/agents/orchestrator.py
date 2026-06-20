@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import inspect
 from typing import Any, Literal
-from pydantic import create_model
+from pydantic import BaseModel, Field, create_model
 
 from rh_cognitv.agents.context import (
     ActiveContext,
@@ -53,6 +53,15 @@ def function_node_to_tool_definition(node: FunctionNode) -> ToolDefinition:
     )
 
 
+class AgentPersona(BaseModel):
+    """Identity and general role/capabilities of the reasoning agent."""
+    name: str = Field(default="an autonomous reasoning agent", description="The name or style of the agent persona")
+    role: str = Field(
+        default="You are given a single high-level task and must drive it to completion yourself — deciding *what* to do, in *what order*, and *when you are done*, without being told the individual tool calls. You are also a context steward: you keep your own working memory compact and high-signal.",
+        description="The general role, capabilities, and system guidelines for the agent persona"
+    )
+
+
 class AgentOrchestrator:
     """Orchestrates multi-step agent reasoning loops using low-level nodes."""
 
@@ -63,11 +72,13 @@ class AgentOrchestrator:
         *,
         event_bus: EventBus | None = None,
         agent_id: str = "agent-0",
+        persona: AgentPersona | None = None,
     ) -> None:
         self.llm_node = llm_node
         self.action_tools = action_tools
         self.event_bus = event_bus
         self.agent_id = agent_id
+        self.persona = persona or AgentPersona()
 
     async def _publish(self, event: Any) -> None:
         if self.event_bus is not None:
@@ -91,6 +102,77 @@ class AgentOrchestrator:
             auto_memory=auto_memory or [],
             max_active_observations=max_active_observations,
         )
+
+        # Determine task complexity before starting the loop.
+        classification_prompt = (
+            "You are a task complexity classifier. Analyze the following task and determine if it is a "
+            "complex multi-step task requiring planning, tool calls, and sequential execution, or if it is "
+            "a simple conversational question/query/message that can be answered directly in a single turn without "
+            "needing a TODO checklist or action tools.\n\n"
+            "Respond with exactly one word: 'COMPLEX' or 'SIMPLE'.\n\n"
+            f"Task: {task}\n"
+            "Response:"
+        )
+
+        async def silent_sink(e):
+            pass
+
+        classification_result = await self.llm_node.collect(
+            classification_prompt,
+            config,
+            on_event=silent_sink,
+        )
+        decision = (classification_result.text or "").strip().upper()
+        is_complex = "SIMPLE" not in decision
+
+        if not is_complex:
+            # Register history in notebook entries
+            context.notebook_entries.append(f"User asked: {task}")
+            
+            # Run a single direct answer step
+            step = 1
+            await self._publish(AgentStepStarted(agent_id=self.agent_id, step_index=step))
+            
+            direct_prompt = (
+                f"You are {self.persona.name}.\n"
+                f"Role/Guidelines: {self.persona.role}\n\n"
+                f"The user has asked: {task}\n\n"
+                "Please provide a direct answer to the user's query."
+            )
+            
+            stream = self.llm_node.run(
+                prompt=direct_prompt,
+                config=config,
+                tools=[],
+                tool_choice="none",
+            )
+            
+            accumulated_text = ""
+            async for event in stream:
+                if event.type == "stream_delta" and event.text:
+                    accumulated_text += event.text
+                    await self._publish(AgentTextDelta(agent_id=self.agent_id, text=event.text))
+                elif event.type == "stream_thinking_delta" and event.text:
+                    await self._publish(AgentThoughtDelta(agent_id=self.agent_id, text=event.text))
+            
+            _step_meta = self.llm_node.result.meta if self.llm_node.result else None
+            step_tokens_prompt     = _step_meta.tokens_used.prompt_tokens     if _step_meta else None
+            step_tokens_completion = _step_meta.tokens_used.completion_tokens if _step_meta else None
+            step_tokens_total      = _step_meta.tokens_used.total_tokens      if _step_meta else None
+            step_duration_ms       = _step_meta.duration_ms                   if _step_meta else None
+            
+            await self._publish(
+                AgentStepCompleted(
+                    agent_id=self.agent_id,
+                    step_index=step,
+                    status="completed",
+                    tokens_prompt=step_tokens_prompt,
+                    tokens_completion=step_tokens_completion,
+                    tokens_total=step_tokens_total,
+                    duration_ms=step_duration_ms,
+                )
+            )
+            return context
 
         # Persistent multi-turn history shared across all steps.
         # Initialised on step 1 then grown in-place; system prompt is refreshed
@@ -148,10 +230,7 @@ class AgentOrchestrator:
             prompt_content = context.format_context()
             system_prompt = (
                 "## Role\n"
-                "You are an autonomous reasoning agent. You are given a single high-level task and "
-                "must drive it to completion yourself — deciding *what* to do, in *what order*, and "
-                "*when you are done*, without being told the individual tool calls. You are also a "
-                "context steward: you keep your own working memory compact and high-signal.\n\n"
+                f"You are {self.persona.name}. {self.persona.role}\n\n"
                 "## Tools available to you\n"
                 "You have two kinds of tools.\n\n"
                 "**Internal context tools** (always available) — use these to manage your own cognition:\n"

@@ -35,6 +35,7 @@ from rh_cognitv import (
     AgentToolCallStarted,
     AgentToolCallFinished,
     AgentStepCompleted,
+    AgentPersona
 )
 
 from _common import make_adapter, chat_model
@@ -157,13 +158,20 @@ async def main() -> None:
         action_tools=action_tools,
         event_bus=bus,
         agent_id="explorer-agent",
+        persona=AgentPersona(
+            name="AI Researcher",
+            role="Your name is BeeCaBoo, I funny agent. Respond with good mood and using emojis."
+        )
     )
 
+    
     task = (
         "Explore the /app project and produce a short knowledge summary of what it is. "
         "Inspect the top-level directory and read the README to understand the project, "
         "then capture the key facts, decide which module appears most important."        
     )
+    
+    #task = "Who are you and how do you work?"
 
     print(f"\n🚀  TASK: {task}\n")
 

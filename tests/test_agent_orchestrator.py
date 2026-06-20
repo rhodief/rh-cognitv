@@ -114,7 +114,10 @@ async def test_agent_orchestrator_loop() -> None:
         StreamDelta(text="Thinking: Finished task."),
     ]
 
-    mock_adapter = MockStreamAdapter([step1_deltas, step2_deltas, step3_deltas, step4_deltas])
+    # Prepend classification step mock response (COMPLEX)
+    class_deltas = [StreamDelta(text="COMPLEX")]
+
+    mock_adapter = MockStreamAdapter([class_deltas, step1_deltas, step2_deltas, step3_deltas, step4_deltas])
     llm_node = LLMStreamNode(mock_adapter)
     
     # We wrap the user action tool
@@ -203,3 +206,73 @@ async def test_agent_orchestrator_loop() -> None:
     assert len(read_file_events) == 1, "read_file should appear without prefix"
     assert not any(e.tool_name.startswith("external.") for e in tool_started_events), \
         "Bus events should never expose the external. prefix"
+
+
+@pytest.mark.asyncio
+async def test_agent_orchestrator_simple_task() -> None:
+    from rh_cognitv.agents.orchestrator import AgentPersona
+
+    # Step 1 (classification): SIMPLE
+    # Step 2 (direct answer): "Direct response text."
+    mock_adapter = MockStreamAdapter([
+        [StreamDelta(text="SIMPLE")],
+        [StreamDelta(text="Direct response text.")],
+    ])
+    llm_node = LLMStreamNode(mock_adapter)
+    event_bus = EventBus()
+    published_events = []
+
+    async def log_event(event: Any) -> None:
+        published_events.append(event)
+
+    event_bus.subscribe("*", log_event)
+
+    persona = AgentPersona(name="Custom Agent", role="I am a helpful assistant.")
+
+    orchestrator = AgentOrchestrator(
+        llm_node=llm_node,
+        action_tools=[],
+        event_bus=event_bus,
+        agent_id="test-simple-agent",
+        persona=persona,
+    )
+
+    config = LLMConfig(model="mock-model")
+    final_context = await orchestrator.run_task(
+        task="Who are you?",
+        config=config,
+        max_steps=5,
+    )
+
+    # Verify that history was logged in notebooks
+    assert "User asked: Who are you?" in final_context.notebook_entries
+
+    # Verify that the direct response was streamed
+    await asyncio.sleep(0.05)
+    assert any(e.type == "agent_step_started" for e in published_events)
+    assert any(e.type == "agent_text_delta" and e.text == "Direct response text." for e in published_events)
+    assert any(e.type == "agent_step_completed" and e.status == "completed" for e in published_events)
+    # Since it was simple, it should not have created any TODO steps
+    assert len(final_context.todo.steps) == 0
+
+
+@pytest.mark.asyncio
+async def test_agent_orchestrator_custom_persona() -> None:
+    from rh_cognitv.agents.orchestrator import AgentPersona
+
+    mock_adapter = MockStreamAdapter([
+        [StreamDelta(text="COMPLEX")],
+        [StreamDelta(text="Thinking: Direct.")],
+    ])
+    llm_node = LLMStreamNode(mock_adapter)
+    persona = AgentPersona(name="SearchBot", role="Search facts and decide.")
+
+    orchestrator = AgentOrchestrator(
+        llm_node=llm_node,
+        action_tools=[],
+        persona=persona,
+    )
+
+    assert orchestrator.persona.name == "SearchBot"
+    assert orchestrator.persona.role == "Search facts and decide."
+

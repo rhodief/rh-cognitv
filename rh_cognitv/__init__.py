@@ -83,7 +83,7 @@ from rh_cognitv.event_bus import (
     AgentStepCompleted,
 )
 from rh_cognitv.nodes.function_node import FunctionNode, FunctionResult
-from rh_cognitv.agents.orchestrator import AgentOrchestrator
+from rh_cognitv.agents.orchestrator import AgentOrchestrator, AgentPersona
 from rh_cognitv.agents.context import (
     ActiveContext,
     TodoState,
@@ -156,6 +156,7 @@ __all__ = [
     "AgentStepCompleted",
     # agents
     "AgentOrchestrator",
+    "AgentPersona",
     "ActiveContext",
     "TodoState",
     "TodoItem",
