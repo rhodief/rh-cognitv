@@ -64,7 +64,8 @@ async def test_agent_orchestrator_loop() -> None:
         ),
     ]
 
-    # Step 2: LLM says "Reading the file..." and calls read_file(path="config.json")
+    # Step 2: LLM says "Reading the file..." and calls external__read_file(path="config.json")
+    # (external tools are prefixed with "external__" in the LLM's tool definitions)
     step2_deltas = [
         StreamDelta(text="Thinking: Reading the file..."),
         StreamDelta(
@@ -72,7 +73,7 @@ async def test_agent_orchestrator_loop() -> None:
                 StreamToolCallDelta(
                     index=0,
                     call_id="call-2",
-                    tool_name="read_file",
+                    tool_name="external__read_file",
                     arguments_delta='{"path": "config.json"}',
                 )
             ]
@@ -196,3 +197,9 @@ async def test_agent_orchestrator_loop() -> None:
             assert ev.tool_kind == "internal", f"{ev.tool_name} should be internal"
         elif ev.tool_name == "read_file":
             assert ev.tool_kind == "external", f"{ev.tool_name} should be external"
+
+    # Verify events expose the ORIGINAL unprefixed name (not "external__read_file")
+    read_file_events = [e for e in tool_started_events if e.tool_name == "read_file"]
+    assert len(read_file_events) == 1, "read_file should appear without prefix"
+    assert not any(e.tool_name.startswith("external__") for e in tool_started_events), \
+        "Bus events should never expose the external__ prefix"

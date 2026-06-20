@@ -100,16 +100,46 @@ class AgentOrchestrator:
         for step in range(1, max_steps + 1):
             await self._publish(AgentStepStarted(agent_id=self.agent_id, step_index=step))
 
-            # Build tools list for this step
-            ctx_tools = get_default_context_tools(context)
-            all_tools = list(self.action_tools) + list(ctx_tools)
-            tools_map = {t.name: t for t in all_tools}
-            tool_definitions = [function_node_to_tool_definition(t) for t in all_tools]
+            # Build tools list for this step.
+            # External (user-provided) tools are prefixed with "external__" in
+            # the tool definitions sent to the LLM so they can never collide
+            # with internal context tool names (e.g. "todo__create").  The
+            # prefix is stripped when emitting bus events so consumers always
+            # see the original tool name + tool_kind.
+            EXTERNAL_PREFIX = "external__"
 
-            # Track which tools are internal (framework context tools) vs
-            # external (user-provided action tools) so the bus events carry
-            # a classification that frontends can use for rendering.
+            ctx_tools = get_default_context_tools(context)
             internal_tool_names = {t.name for t in ctx_tools}
+
+            # Validate no duplicate names among user-provided action tools.
+            seen_external: set[str] = set()
+            for t in self.action_tools:
+                if t.name in seen_external:
+                    raise ValueError(
+                        f"Duplicate external tool name: '{t.name}'. "
+                        f"Each action tool must have a unique name."
+                    )
+                seen_external.add(t.name)
+
+            # Build handler maps: internal tools keep original names,
+            # external tools get the prefix.
+            internal_tools_map: dict[str, FunctionNode] = {t.name: t for t in ctx_tools}
+            external_tools_map: dict[str, FunctionNode] = {
+                f"{EXTERNAL_PREFIX}{t.name}": t for t in self.action_tools
+            }
+
+            # Merged map for handler lookup (no collisions possible thanks to prefix)
+            tools_map = {**internal_tools_map, **external_tools_map}
+
+            # Tool definitions for the LLM: internal keep original names,
+            # external get the prefix.
+            internal_defs = [function_node_to_tool_definition(t) for t in ctx_tools]
+            external_defs = []
+            for t in self.action_tools:
+                td = function_node_to_tool_definition(t)
+                td = td.model_copy(update={"name": f"{EXTERNAL_PREFIX}{t.name}"})
+                external_defs.append(td)
+            tool_definitions = external_defs + internal_defs
 
             # Enforce hygiene on context
             context.apply_hygiene()
@@ -211,34 +241,42 @@ class AgentOrchestrator:
             tool_results: list[str] = []
 
             for call in tool_calls_to_run:
-                tool_name = call.tool_name
+                # The LLM returns the prefixed name; resolve the original name
+                # and tool_kind by checking the prefix.
+                raw_tool_name = call.tool_name
+                if raw_tool_name.startswith(EXTERNAL_PREFIX):
+                    original_name = raw_tool_name[len(EXTERNAL_PREFIX):]
+                    tool_kind = "external"
+                else:
+                    original_name = raw_tool_name
+                    tool_kind = "internal"
+
                 arguments = call.arguments
                 call_id = call.call_id
-                tool_kind = "internal" if tool_name in internal_tool_names else "external"
 
                 await self._publish(
                     AgentToolCallStarted(
                         agent_id=self.agent_id,
-                        tool_name=tool_name,
+                        tool_name=original_name,
                         arguments=arguments,
                         call_id=call_id,
                         tool_kind=tool_kind,
                     )
                 )
 
-                handler = tools_map.get(tool_name)
+                handler = tools_map.get(raw_tool_name)
                 if handler is not None:
                     res = await handler.run(**arguments)
                     output = str(res.output) if res.output is not None else ""
                     error = res.error
                 else:
                     output = ""
-                    error = f"Capability tool '{tool_name}' not found."
+                    error = f"Capability tool '{original_name}' not found."
 
                 await self._publish(
                     AgentToolCallFinished(
                         agent_id=self.agent_id,
-                        tool_name=tool_name,
+                        tool_name=original_name,
                         arguments=arguments,
                         output=output,
                         error=error,
@@ -248,31 +286,31 @@ class AgentOrchestrator:
                 )
 
                 # Accumulate for the batched observation message
-                result_line = f"[{tool_name}] → {output if not error else f'ERROR: {error}'}"
+                result_line = f"[{original_name}] → {output if not error else f'ERROR: {error}'}"
                 tool_results.append(result_line)
 
                 # Store tool result as observation in context
                 obs_content = output if not error else f"Error executing tool: {error}"
                 context.recent_observations.append(
-                    Observation(content=obs_content, source=tool_name)
+                    Observation(content=obs_content, source=original_name)
                 )
 
                 # Publish rich events for context mutations
-                if tool_name == "context__extract_facts" and not error:
+                if original_name == "context__extract_facts" and not error:
                     for fact in context.recent_facts[-len(arguments.get("facts", [])) :]:
                         await self._publish(
                             AgentFactExtracted(
                                 agent_id=self.agent_id, fact_id=fact.id, content=fact.content
                             )
                         )
-                elif tool_name == "context__make_decision" and not error:
+                elif original_name == "context__make_decision" and not error:
                     dec = context.pending_decisions[-1]
                     await self._publish(
                         AgentDecisionMade(
                             agent_id=self.agent_id, decision_id=dec.id, content=dec.content
                         )
                     )
-                elif tool_name in ("todo__create", "todo__update") and not error:
+                elif original_name in ("todo__create", "todo__update") and not error:
                     await self._publish(
                         AgentTodoUpdated(
                             agent_id=self.agent_id,
