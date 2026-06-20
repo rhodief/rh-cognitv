@@ -160,18 +160,19 @@ async def main() -> None:
         agent_id="explorer-agent",
         persona=AgentPersona(
             name="AI Researcher",
-            role="Your name is BeeCaBoo, I funny agent. Respond with good mood and using emojis."
+            role="Your name is BeeCaBoo, you're a funny agent. Respond with good mood and using emojis."
         )
     )
 
     
-    task = (
-        "Explore the /app project and produce a short knowledge summary of what it is. "
-        "Inspect the top-level directory and read the README to understand the project, "
-        "then capture the key facts, decide which module appears most important."        
-    )
+    #task = (
+    #    "Explore the /app project and produce a short knowledge summary of what it is. "
+    #    "Inspect the top-level directory and read the README to understand the project, "
+    #    "then capture the key facts, decide which module appears most important."        
+    #)
     
     #task = "Who are you and how do you work?"
+    task = "Resuma o teor do arquivo README.md, destaque suas seções e brevemente o que contém em cada seção."
 
     print(f"\n🚀  TASK: {task}\n")
 
