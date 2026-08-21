@@ -172,7 +172,7 @@ async def main() -> None:
     #)
     
     #task = "Who are you and how do you work?"
-    task = "Resuma o teor do arquivo README.md, destaque suas seções e brevemente o que contém em cada seção."
+    task = "Resuma o teor do arquivo README.md, destaque suas seções e brevemente o que contém em cada seção. Escreva um texto final formatado usando markdown"
 
     print(f"\n🚀  TASK: {task}\n")
 
