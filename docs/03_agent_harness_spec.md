@@ -2,8 +2,8 @@
 
 > Derived from [02_agent_context](./02_agent_context) (the Agent Operating System prompt)
 > Builds on [01_execution_nodes_spec.md](./01_execution_nodes_spec.md) (execution nodes, shipped)
-> Deferred items tracked in [future.md](./future.md)
-> Status: **Draft — pending decisions marked in §4**
+> Deferred items tracked in [§8](#8-deferred-to-later-versions) and [future.md](./future.md)
+> Status: **Consolidated — all decisions resolved; ready to build from Phase 0 (see [§9](#9-development-readiness))**
 
 ---
 
@@ -53,7 +53,8 @@ Cross-cutting principles, inherited and extended from the node layer:
 ### Weaknesses
 
 - **No persistence layer exists at all.** Everything to date is in-process. Sessions, memory, and artifacts are entirely greenfield, and getting the storage seams wrong is expensive to undo.
-- **No `FunctionNode` in the live tree.** Tool execution has no canonical node type yet; the harness cannot be built without first re-landing it.
+- **No `FunctionNode` in the live tree.** Tool execution has no canonical node type yet; it must be re-landed in Phase 0 before the harness can be built.
+- **No green test baseline.** Provider integration tests currently fail rather than skip when the SDKs are absent (see [§9](#9-development-readiness)).
 - **Single-maintainer surface area.** This spec describes a system roughly 5× the size of the node layer. Phasing is not optional.
 - **The context assembler is the hardest component** and the least specifiable up front. Truncation, summarization, and relevance are empirical; they need real traces to tune.
 - **No evaluation harness.** Without traces and regression tests over real tasks, "improvements" to the loop are unfalsifiable.
@@ -122,7 +123,9 @@ rh_cognitv/
 │       ├── artifact_store.py           # ArtifactStore
 │       ├── blob_store.py               # BlobStore
 │       ├── tool_provider.py            # ToolProvider
-│       ├── vector_index.py             # VectorIndex
+│       ├── vector_index.py             # VectorIndex        (declared, DF-06)
+│       ├── event_sink.py               # EventSink          (SG-06)
+│       ├── redactor.py                 # Redactor           (SG-14)
 │       ├── lock.py                     # LockProvider
 │       ├── tokenizer.py                # Tokenizer
 │       └── clock.py                    # Clock, IdGenerator
@@ -152,7 +155,9 @@ AgentLoop.step(session)
   2. MemoryService.recall(session)             -> relevant MemoryRecords
   3. ContextAssembler.assemble(session, recall)-> list[Message] within TokenBudget
   4. ToolRegistry.resolve(session)             -> list[ToolDefinition]
-  5. LLMStreamNode / LLMStructuredNode         -> text + tool_calls (events -> EventBus)
+  5. reasoning call, per resolved ReasoningMode -> ReasoningResult (events -> EventBus)
+        stream     -> LLMStreamNode
+        structured -> LLMStructuredNode
   6. dispatch tool calls
         cognitive -> mutate session in-process
         external  -> ToolProvider.invoke (concurrent when independent)
@@ -167,301 +172,258 @@ Step 8 is the crux of the whole design: **the session is durable after every ste
 
 ---
 
-## 4. Design Decisions
+## 4. Design Decisions (Consolidated)
 
-Each decision below states the issue, why it is non-obvious, the options considered, a recommendation, and a slot for your response. Trivial decisions are omitted; where an answer follows directly from the existing spec (async-only, Pydantic-first, constructor injection) it is inherited rather than re-litigated.
+Each decision below states the issue, why it matters, and the decision taken. Alternatives that were considered and rejected are not reproduced; where a decision defers part of its scope, the deferred part is listed in [§8 Deferred to Later Versions](#8-deferred-to-later-versions). Where an answer follows directly from the node-layer spec (async-only, Pydantic-first, constructor injection) it is inherited rather than re-litigated.
 
 ---
 
-### DD-13: Ownership of Agent State — Loop Object vs. Externalized Snapshot
+### DD-13: Ownership of Agent State — Externalized Snapshot
 
-**Issue.** The prior `AgentOrchestrator` held `ActiveContext` in memory and returned it at the end of `run_task()`. That is incompatible with the stated requirement for a stateless, distributable harness. We must decide where run state lives and who owns its lifecycle.
+**Issue.** The prior `AgentOrchestrator` held `ActiveContext` in memory and returned it at the end of `run_task()`. That is incompatible with a stateless, distributable harness. Where does run state live, and who owns its lifecycle?
 
 **Why it matters.** This is the single most load-bearing decision in the spec. It determines whether the harness can survive a process restart, whether a run can be handed between workers, whether human-in-the-loop is possible at all (an interrupt may last hours), whether runs can be replayed or forked, and whether horizontal scaling is achievable. Every other component's signature depends on the answer. Retrofitting externalized state onto an object-oriented loop is effectively a rewrite.
 
-**Options.**
+**Decision.** A `SessionState` Pydantic model is the **sole source of truth**. `AgentLoop` is a stateless service — `async def step(state) -> StepOutcome` — and state is persisted via `SessionStore` after every step. Distribution, HITL, replay, and crash recovery all fall out of this.
 
-1. *Loop owns state (prior art).* `AgentLoop` holds mutable state; `run()` blocks to completion. Simplest and fastest to write, best ergonomics for short synchronous runs. Cannot suspend, cannot distribute, cannot recover from crash. Rejected — it fails the primary requirement.
-2. *Externalized snapshot.* A `SessionState` Pydantic model is the sole source of truth. `AgentLoop` is a stateless service: `async def step(state) -> StepOutcome`, with state persisted via `SessionStore` after each step. Distribution, HITL, replay, and recovery all fall out naturally. Costs serialization discipline — every piece of state must be a serializable model, which forbids holding open handles or live generators across step boundaries.
-3. *Event-sourced log.* Persist an append-only event log; rebuild state by folding events. Gives perfect audit and time-travel. Adds a fold/projection layer, snapshotting for performance, and event-schema migration — substantial complexity for benefits we can approximate with per-step snapshots plus the event stream.
+The cost is serialization discipline: every piece of run state must be a serializable model, so no open handles, live generators, or provider client objects may be held across a step boundary.
 
-**Recommendation: Option 2**, with a deliberate nod to Option 3. `SessionState` carries `schema_version: int` from day one, and the `EventBus` stream is persistable separately so we retain the audit trail without paying for a fold layer. Option 3 remains available later as an optimization for large sessions (snapshot + delta), and `jsonpatch` is already a dependency, which makes delta-encoding cheap when we want it.
+`SessionState` carries `schema_version: int` from day one (DD-25), and the `EventBus` stream is persistable separately (SG-06) so we keep the audit trail without paying for an event-fold layer.
 
-The high-level convenience API (`await agent.run(task)`) is preserved as a thin driver that loops `step()` against an in-memory store — so trivial use is still one line, while the durable path is the same code.
-
-**Your comment:**
->
->
+The convenience API (`await agent.run(task)`) is a thin driver that loops `step()` against an in-memory store — trivial use stays one line, and the durable path is the same code.
 
 ---
 
-### DD-14: Memory Model — Typed Records vs. Free-Form Scratchpad
+### DD-14: Memory Model — Typed Records with a Kind Discriminator
 
-**Issue.** [02_agent_context](./02_agent_context) defines four information forms — Observation, Fact, Decision, State — plus a lifecycle for promoting between them. We must decide whether those are enforced types in the data model or merely prompt-level guidance.
+**Issue.** [02_agent_context](./02_agent_context) defines four information forms — Observation, Fact, Decision, State — plus a lifecycle for promoting between them. Are those enforced types in the data model, or merely prompt-level guidance?
 
-**Why it matters.** Retention, recall, and context-budget policy all need to discriminate between kinds of information. "Keep the last 3 observations but never drop a decision" is expressible only if kind is structured data. If memory is a free-form scratchpad, every policy degrades to "truncate the oldest", which is precisely the failure mode that makes long agent runs lose their own conclusions. Conversely, over-typing risks the model refusing to fit its output into our taxonomy, producing empty or mis-classified records.
+**Why it matters.** Retention, recall, and context-budget policy all need to discriminate between kinds of information. "Keep the last 3 observations but never drop a decision" is expressible only if kind is structured data. If memory is a free-form scratchpad, every policy degrades to "truncate the oldest", which is precisely the failure mode that makes long agent runs lose their own conclusions.
 
-**Options.**
+**Decision.** A single `MemoryRecord` with a `kind` discriminator (`observation | fact | decision | state | note | artifact_ref`), plus scope, salience, provenance, TTL, and timestamps — mirroring the discriminated-union pattern already used for stream events.
 
-1. *Free-form notes.* A single `notes: list[str]`. Trivial to implement; the model writes whatever it wants. No policy leverage, no structured recall, no dedup.
-2. *Typed `MemoryRecord` with a `kind` discriminator.* One table/collection, records tagged `observation | fact | decision | state | note | artifact_ref`, each with scope, salience, provenance (`derived_from: list[str]`), TTL, and timestamps. Policies operate per-kind. Retrieval can filter by kind. Requires the model to classify when writing — mitigated by defaulting to `note` and letting a promotion step reclassify.
-3. *Separate stores per kind.* Maximum type safety, but multiplies the port surface (four stores instead of one) and makes cross-kind queries and promotion awkward.
+**Kind is advisory to the model but authoritative to the policy engine.** `memory.write` defaults to `kind="note"`, and promotion (note → fact → decision) happens either through an explicit cognitive tool or a periodic consolidation step. This avoids forcing the model to classify at write time — the failure mode that produces empty or mis-classified records — while still yielding structured memory the policy engine can reason over.
 
-**Recommendation: Option 2.** A single `MemoryRecord` with a `kind` discriminator, mirroring the discriminated-union pattern already used for stream events. Crucially, **kind is advisory to the model but authoritative to the policy engine**: `memory.write` defaults `kind="note"`, and promotion (note → fact → decision) happens either via an explicit cognitive tool or a periodic consolidation step. This avoids forcing classification at write time while still yielding structured memory.
-
-`derived_from` provenance is included from the start; it is nearly free to record and impossible to reconstruct later, and it is what makes "why does the agent believe this?" answerable.
-
-**Your comment:**
->
->
+`derived_from` provenance is recorded from the start: nearly free to capture, impossible to reconstruct later, and the only thing that makes "why does the agent believe this?" answerable.
 
 ---
 
-### DD-15: Context Assembly — Implicit Message History vs. Deterministic Re-Rendering
+### DD-15: Context Assembly — Rendered State Header + Bounded Raw Window
 
-**Issue.** Two ways to build the prompt each step: append to a growing `list[Message]` (the chat-transcript model), or discard the transcript and deterministically re-render the prompt from `SessionState` + recalled memory each step (the state-projection model). The prior `AgentOrchestrator` did both, growing a message history *and* re-rendering the system prompt.
+**Issue.** Two ways to build the prompt each step: append to a growing `list[Message]` (the chat-transcript model), or re-render the prompt deterministically from `SessionState` + recalled memory (the state-projection model). The prior `AgentOrchestrator` did both.
 
-**Why it matters.** This governs long-run behaviour, cost, and debuggability. A growing transcript inevitably overflows the context window and forces destructive truncation; it also makes prompt caching effective (stable prefix) but makes the prompt a function of history rather than of state. Deterministic re-rendering keeps the prompt bounded and reproducible — the same state always produces the same prompt, which makes bugs reproducible and enables replay — but it breaks naive prefix caching and risks losing conversational nuance that was never distilled into memory. The hybrid is what most mature harnesses converge on, but the split point is the actual design question.
+**Why it matters.** This governs long-run behaviour, cost, and debuggability. A growing transcript inevitably overflows the window and forces destructive truncation. Pure state projection is bounded and reproducible but loses everything the model never wrote to memory.
 
-**Options.**
+**Decision.** A hybrid with an explicit boundary: a **rendered state header** (task, plan, TODO, decisions, facts, recalled memory, retrieval ledger) followed by a **bounded window of recent raw turns**. When the window overflows, evicted turns are compacted into memory records — the eviction path always routes through `MemoryService`, never a silent `del`.
 
-1. *Pure transcript.* Standard chat loop. Best model fidelity, best caching, unbounded growth, non-reproducible prompts.
-2. *Pure state projection.* Prompt is a pure function of `SessionState` + recall. Bounded and reproducible; loses everything not explicitly written to memory, which puts enormous pressure on the model's discipline in calling `memory.write`.
-3. *Hybrid with an explicit boundary.* A rendered state header (task, plan, TODO, decisions, facts, recalled memory, retrieval ledger) followed by a **bounded window** of recent raw turns. When the window overflows, the evicted turns are compacted into memory records rather than deleted.
+This directly encodes the context-budget priority from [02_agent_context](./02_agent_context): **State > Decisions > Facts > Observations**. Observations are evicted first, facts compacted second, state and decisions preserved longest.
 
-**Recommendation: Option 3**, with the boundary owned by `ContextAssembler` and the eviction path always routing through `MemoryService` — never a silent `del`. This directly encodes the context-budget priority from [02_agent_context](./02_agent_context): State > Decisions > Facts > Observations. Observations are evicted first, facts compacted second, state and decisions preserved longest.
-
-`ContextAssembler` is a port with a default implementation, so a caller can supply a domain-specific assembler without forking the loop. It emits a `ContextAssembled` event carrying the per-section token breakdown, which is the only realistic way to debug context problems.
-
-**Your comment:**
->
->
+`ContextAssembler` is a port with a default implementation, so a caller can supply a domain-specific assembler without forking the loop. It emits a `ContextAssembled` event carrying the per-section token breakdown (SG-09), which is the only realistic way to debug context problems, and orders sections most-stable-first for prompt caching (SG-10).
 
 ---
 
-### DD-16: Tool Namespace — Flat vs. Namespaced Registry with Scopes
+### DD-16: Tool Namespace — Dot-Namespaced Registry with Origin Prefix and Scopes
 
-**Issue.** Four distinct tool sources must coexist: cognitive tools (`todo.create`, `memory.write` — internal to the agent's own working process), builtins, user-registered functions, and dynamically discovered MCP tools. The prior orchestrator prefixed user tools with `external.` to avoid collisions. We must define the general scheme.
+**Issue.** Four distinct tool sources must coexist: cognitive tools (`todo.create`, `memory.write` — internal to the agent's own working process), builtins, user-registered functions, and dynamically discovered MCP tools. We must define the naming and identity scheme.
 
 **Why it matters.** MCP servers are discovered at runtime and their names are outside our control; collisions are a matter of when, not if. Beyond collisions, tool *identity* drives permissions (which tools may a subagent use?), audit (what actually ran?), cost attribution, and approval gating (which tools need a human to confirm?). A flat namespace forecloses all of these. Additionally, exposing every available tool on every call inflates the prompt and measurably degrades tool-selection accuracy once the count grows past roughly two dozen.
 
-**Options.**
+**Decision.** A namespaced `ToolRegistry` storing `HarnessTool` records carrying `origin`, `namespace`, `scope` (`cognitive | builtin | user | mcp | subagent`), `provider_id`, `requires_approval`, and a `ToolDefinition`. A `ToolFilter` selects the subset exposed for a given step or subagent — the mechanism that keeps prompts small as the tool ecosystem grows.
 
-1. *Flat names, last-write-wins.* Simplest. Silent shadowing, no provenance, no scoping. Rejected.
-2. *Prefixed names, flat storage.* Prior art (`external.foo`). Solves collisions only, and prefixing corrupts the name the model sees, which subtly degrades selection quality.
-3. *Namespaced registry with scopes and per-run filtering.* `ToolRegistry` stores `HarnessTool` records carrying `namespace`, `name`, `scope` (`cognitive | builtin | user | mcp`), `provider`, `requires_approval`, and a `ToolDefinition`. The fully-qualified `namespace:name` is the internal identity; the exposed name is qualified only on actual collision. A `ToolFilter` selects the subset exposed for a given step or subagent.
+**Naming scheme — dot notation with a reserved origin prefix:**
 
-**Recommendation: Option 3.** The registry is the natural place for approval gating (DD-18) and subagent capability restriction, and per-run filtering is the mechanism that keeps prompts small as the tool ecosystem grows.
+```
+<origin>.<namespace>.<name>          origin ∈ {internal, external}
 
-Concretely: `ToolProvider` is the port (`list_tools()`, `invoke(name, args)`), with `McpToolProvider`, `FunctionToolProvider`, and `SubagentToolProvider` as adapters. Cognitive tools are *not* a provider — they mutate `SessionState` in-process and are dispatched by the loop directly, since they must not cross a serialization boundary.
+internal.memory.write                cognitive + builtin tools
+internal.todo.update
+external.github.create_issue         MCP / user-registered tools
+external.docs.classify
+```
 
-**Your comment:**
->
->
+- `internal.` is **reserved**. `ToolRegistry.register()` raises `ToolNamespaceError` if a caller attempts to register under it, so a package user can never shadow a cognitive tool.
+- The fully-qualified dotted name is the tool's identity everywhere: registry keys, `ToolResult.tool_name`, events, audit records, and `ToolFilter` patterns (`external.github.*`).
 
----
+**Provider name mangling.** Some providers reject `.` in function names (OpenAI constrains names to `^[A-Za-z0-9_-]{1,64}$`). Translation is an **adapter concern, not a core concern**: the adapter encodes `.` → `__` on the way out and decodes `__` → `.` on every returned tool call, so the harness only ever sees dotted names. To keep the mapping bijective, the registry rejects `__` inside a raw segment (`ToolNamespaceError`). Adapters that accept dots pass names through unchanged.
 
-### DD-17: Bulk Work — Model-Driven TODOs vs. Deterministic Workflows
+This requires a change to the shipped `OpenAIAdapter` plus round-trip tests (encode → provider → decode) — see [§9 Development Readiness](#9-development-readiness).
 
-**Issue.** Your 300-document classification scenario. Should the agent enumerate work as TODO items and iterate under model control, or emit a declarative workflow spec that a deterministic engine executes?
-
-**Why it matters.** This is the difference between a harness that works on demos and one that works on real workloads. Model-driven iteration over 300 items is quadratic in context (each item's result pollutes the window), non-resumable mid-way, impossible to parallelize safely, and priced accordingly. It also fails unpredictably: the model loses track around item 40 and starts hallucinating progress. Deterministic execution gives bounded per-item context, natural parallelism with a concurrency cap, per-item retry, and exact resumability — at the cost of requiring the model to correctly *specify* the workflow up front.
-
-**Options.**
-
-1. *TODO-only.* One TODO per item. Rejected for the reasons above.
-2. *Workflow-only.* All iteration must go through the engine. Rigid; genuinely exploratory tasks don't have a knowable shape in advance.
-3. *Two-tier: TODOs for reasoning, workflows for bulk.* The model uses `todo.*` for the handful of high-level reasoning steps, and calls `workflow.run` with a declarative `WorkflowSpec` for anything homogeneous and repetitive. The engine executes deterministically, spawning subagents as per-item workers, writing each result to the `ArtifactStore`, and returning a **summary plus artifact references** — never the 300 payloads — to the parent context.
-
-**Recommendation: Option 3.** The v1 engine supports `Sequence`, `ForEach` (with `max_concurrency`), `Map`, and `Reduce` — enough for the document-classification case and most realistic bulk work. Each `StepSpec` declares `input_schema` and `output_schema` as Pydantic models, so per-item workers use `LLMStructuredNode` and produce validated, typed output rather than prose that must be re-parsed.
-
-Deliberately excluded from v1: conditionals, loops with dynamic termination, and arbitrary DAGs. Those turn the spec into a programming language, and we should see real workloads before designing that surface. `WorkflowSpec` is versioned so the vocabulary can grow additively.
-
-**Your comment:**
->
->
+**Providers vs. cognitive tools.** `ToolProvider` is the port (`list_tools()`, `invoke(name, args)`), with `McpToolProvider`, `FunctionToolProvider`, and `SubagentToolProvider` as adapters. Cognitive tools are *not* a provider — they mutate `SessionState` in-process and are dispatched by the loop directly, since they must not cross a serialization boundary.
 
 ---
 
-### DD-18: Human-in-the-Loop — Blocking Callback vs. Suspend/Resume Interrupt
+### DD-17: Bulk Work — Two-Tier TODOs and Deterministic Workflows
+
+**Issue.** The 300-document classification scenario. Should the agent enumerate work as TODO items and iterate under model control, or emit a declarative workflow spec that a deterministic engine executes?
+
+**Why it matters.** This is the difference between a harness that works on demos and one that works on real workloads. Model-driven iteration over 300 items is quadratic in context (each item's result pollutes the window), non-resumable mid-way, impossible to parallelize safely, and priced accordingly. It also fails unpredictably: the model loses track around item 40 and starts hallucinating progress.
+
+**Decision.** Two tiers. The model uses `todo.*` for the handful of **high-level reasoning steps**, and calls `workflow.run` with a declarative `WorkflowSpec` for anything **homogeneous and repetitive**. The engine executes deterministically — spawning subagents as per-item workers, writing each result to the `ArtifactStore`, and returning a **summary plus artifact references** to the parent context, never the 300 payloads.
+
+The v1 engine supports `Sequence`, `ForEach` (with `max_concurrency`), `Map`, and `Reduce`. Each `StepSpec` declares `input_schema` and `output_schema` as Pydantic models, so per-item workers use `LLMStructuredNode` and produce validated, typed output rather than prose that must be re-parsed.
+
+Conditionals, dynamically terminating loops, and arbitrary DAGs are **out of scope for v1** (§8) — they turn the spec into a programming language. `WorkflowSpec` is versioned so the vocabulary can grow additively.
+
+---
+
+### DD-18: Human-in-the-Loop — Suspend/Resume Interrupt as the Primitive
 
 **Issue.** The agent must be able to ask a human or a peer agent for clarification. Mechanism?
 
-**Why it matters.** A blocking callback (`await ask_human(question)`) is trivial in a CLI and impossible in a request/response service — you cannot hold an HTTP handler or a worker slot open for a two-hour approval. It also cannot survive a deploy. The interrupt model is strictly more general (a CLI can trivially implement a synchronous responder on top of it) but forces the harness to represent "waiting" as a first-class, persisted state. The same machinery is required for tool-approval gating and for agent-to-agent delegation, so getting it right pays off three times.
+**Why it matters.** A blocking callback (`await ask_human(question)`) is trivial in a CLI and impossible in a request/response service — you cannot hold an HTTP handler or a worker slot open for a two-hour approval, and it cannot survive a deploy. The same machinery is required for tool-approval gating and for agent-to-agent delegation, so getting it right pays off three times.
 
-**Options.**
+**Decision.** Suspend/resume is the **sole primitive**. A tool call (`human.ask`, `agent.ask`, or an approval-gated tool) returns `StepOutcome(status="awaiting_input", interrupt=InterruptRequest(...))`. The loop persists and returns. The caller later invokes `resume(session_id, Resumption(...))`, which injects the response as an observation and continues. The caller owns the transport (webhook, queue, UI) — correctly, since that is a service concern, not a library concern.
 
-1. *Blocking callback.* `HumanProvider.ask()` awaited inline. Trivial, incompatible with distribution. Rejected.
-2. *Suspend/resume interrupt.* A tool call (`human.ask`, `agent.ask`, or an approval-gated tool) returns `StepOutcome(status="awaiting_input", interrupt=InterruptRequest(...))`. The loop persists and returns. The caller later invokes `resume(session_id, Resumption(...))`, which injects the response as an observation and continues. Requires the caller to own the transport (webhook, queue, UI) — which is correct, since that is a service concern, not a library concern.
-3. *Both, with the callback as sugar.* Interrupt is the primitive; an optional `InteractiveResponder` adapter turns it into a blocking call for CLI use.
+A thin `InteractiveResponder` adapter turns the interrupt into a blocking call for CLI ergonomics.
 
-**Recommendation: Option 3** — Option 2 as the sole primitive, with a thin `InteractiveResponder` for ergonomics. Because interruption is unified with tool-approval gating, `requires_approval` on a `HarnessTool` (DD-16) produces exactly the same suspend/resume flow, which is a meaningful safety feature: destructive tools can require explicit confirmation with no extra machinery.
+Because interruption is unified with approval gating, `requires_approval` on a `HarnessTool` (DD-16) produces exactly the same suspend/resume flow — destructive tools can require explicit confirmation with no extra machinery.
 
-`InterruptRequest` carries `kind` (`clarification | approval | delegation`), a `response_schema` (a Pydantic model) so replies are validated on resume, and an optional `timeout_at` for the caller's scheduler to act on.
-
-**Your comment:**
->
->
+`InterruptRequest` carries `kind` (`clarification | approval | delegation`), a `response_schema` so replies are validated on resume, and an optional `timeout_at` for the caller's scheduler to act on.
 
 ---
 
-### DD-19: Storage Ports — One Store vs. Four Segregated Ports
+### DD-19: Storage Ports — Four Segregated Ports
 
 **Issue.** Sessions, memory records, artifacts, and raw blobs all need persistence. One general `Store` port, or separate segregated ports?
 
-**Why it matters.** The access patterns are genuinely different, and conflating them forces every adapter to be bad at something. Sessions are read-modify-write of a single mid-sized document, needing optimistic concurrency. Memory is append-heavy with query-by-kind/scope and eventually semantic search. Artifacts are write-once, read-many, addressed by ID, and potentially large. Blobs are opaque bytes wanting streaming and presigned URLs. A single interface satisfying all four is either lowest-common-denominator (losing concurrency control and query capability) or a god-interface that every adapter partially stubs — violating interface segregation and making a Redis or S3 adapter awkward or impossible.
+**Why it matters.** The access patterns are genuinely different, and conflating them forces every adapter to be bad at something. Sessions are read-modify-write of a single mid-sized document, needing optimistic concurrency. Memory is append-heavy with query-by-kind/scope and eventually semantic search. Artifacts are write-once, read-many, addressed by ID, and potentially large. Blobs are opaque bytes wanting streaming and presigned URLs. A single interface satisfying all four is either lowest-common-denominator or a god-interface that every adapter partially stubs.
 
-**Options.**
+**Decision.** Four segregated ports — `SessionStore`, `MemoryStore`, `ArtifactStore`, `BlobStore` — each minimal and independently implementable, each with an in-memory default so the harness runs out of the box with zero configuration. Realistic deployments mix backends (Postgres for sessions and memory, S3 for blobs), which segregation makes natural.
 
-1. *One `Store` port.* Uniform, minimal surface. Forces the worst trade-off on every adapter. Rejected.
-2. *Four segregated ports* — `SessionStore`, `MemoryStore`, `ArtifactStore`, `BlobStore` — each minimal and each independently implementable. Realistic deployments mix backends (Postgres for sessions and memory, S3 for blobs) which segregation makes natural. Costs four ABCs and four in-memory defaults.
-3. *Two ports* (`StateStore` + `BlobStore`). A middle ground, but it merges session concurrency semantics with memory query semantics, which is exactly the conflation worth avoiding.
+Two specifics are fixed now because they are painful to add later:
 
-**Recommendation: Option 2.** Four ports, each with an in-memory default so the harness runs out of the box with zero configuration.
+- `SessionStore.save()` takes an expected `version` and raises `SessionConflictError` on mismatch — optimistic concurrency is mandatory once two workers can touch one session.
+- `ArtifactStore` stores *metadata plus a `BlobRef`*, delegating actual bytes to `BlobStore`. Artifacts can then live in Postgres while their payloads live in S3, without either port knowing about the other.
 
-Two specifics worth fixing now because they are painful to add later: `SessionStore.save()` takes an expected `version` and raises `SessionConflictError` on mismatch (optimistic concurrency — mandatory once two workers can touch one session); and `ArtifactStore` stores *metadata plus a `BlobRef`*, delegating actual bytes to `BlobStore`. That separation lets artifacts live in Postgres while their payloads live in S3, without either port knowing about the other.
-
-`VectorIndex` is defined as a port in v1 but has no required implementation — semantic recall is gated on maturity (§7).
-
-**Your comment:**
->
->
+`VectorIndex` is declared as a port in v1 with no required implementation (§8).
 
 ---
 
-### DD-20: Subagents — Shared Context vs. Isolated Session with Summary Return
+### DD-20: Subagents — Isolated Session with Briefing and Structured Return
 
 **Issue.** When the agent spawns a subagent for parallel exploration, does the child share the parent's context and memory, or get an isolated session returning only a summary?
 
-**Why it matters.** This is the entire point of subagents. If a child shares and pollutes the parent's context, spawning five explorers multiplies context consumption by five and the parent drowns in raw findings — strictly worse than doing the work inline. The value of a subagent is precisely **context isolation**: the child burns its own window on exploration and returns a distilled result. Getting this wrong makes the feature actively harmful. But full isolation means the child lacks task context and may explore uselessly, so the briefing mechanism matters as much as the isolation.
+**Why it matters.** This is the entire point of subagents. If a child shares and pollutes the parent's context, spawning five explorers multiplies context consumption by five and the parent drowns in raw findings — strictly worse than doing the work inline. The value of a subagent is precisely **context isolation**. But full isolation means the child lacks task context and may explore uselessly, so the briefing mechanism matters as much as the isolation.
 
-**Options.**
+**Decision.** An isolated session with explicit briefing and structured return. The child gets a fresh `SessionState` seeded with a brief (task, the facts/decisions the parent selects or that `MemoryService` recalls, and a restricted tool subset per DD-16). It runs its own loop with its own budget and returns a `SubagentResult` — summary, optional schema-validated structured output, and artifact references — which enters the parent's context as a **single observation**.
 
-1. *Shared context.* Child appends to the parent's session. Defeats the purpose. Rejected.
-2. *Full isolation.* Child gets only its prompt string. Cheap and safe, but under-briefed children waste tokens rediscovering context the parent already had.
-3. *Isolated session with explicit briefing and structured return.* Child gets a fresh `SessionState` seeded with an explicit brief (task, relevant facts/decisions the parent selects or that `MemoryService` recalls, and a restricted tool subset per DD-16). It runs its own loop with its own budget. It returns a `SubagentResult` — a summary, optional schema-validated structured output, and artifact references — which enters the parent's context as a **single observation**.
-
-**Recommendation: Option 3.** Children may write to a **shared `ArtifactStore`** (so bulk output never transits the parent's context) but get their **own memory scope** by default, with promotion of selected findings to the parent scope on return. That combination is what makes the 300-document workflow tractable: 300 children write 300 artifacts, and the parent sees one summary plus a manifest reference.
+Children may write to a **shared `ArtifactStore`** (so bulk output never transits the parent's context) but get their **own memory scope** by default, with promotion of selected findings to the parent scope on return. That combination is what makes the 300-document workflow tractable: 300 children write 300 artifacts, and the parent sees one summary plus a manifest reference.
 
 Recursion depth is capped by `AgentConfig.max_subagent_depth` (default 2), and child budgets are drawn from the parent's remaining budget, so a runaway tree cannot spend unboundedly.
 
-**Your comment:**
->
->
-
 ---
 
-### DD-21: Loop Termination — Model Self-Declaration vs. Composable Stop Policies
+### DD-21: Loop Termination — Composable Stop Policies
 
 **Issue.** How does the loop know it is done? The prior orchestrator stopped when all TODO items were `done` or `max_steps` was hit.
 
-**Why it matters.** Termination is where agent loops fail expensively and embarrassingly. Relying on the model to self-declare completion produces both premature stops (declaring victory on partial work) and non-termination (looping on a tool that keeps failing, burning budget). Relying only on `max_steps` produces truncated work with no signal about *why* it stopped. Callers need to distinguish "finished", "hit the wall", "stuck", and "needs input" in order to react correctly — retry, escalate, or surface to a user. Hard-coding one rule also prevents callers from imposing domain constraints such as "stop when the classification artifact exists".
+**Why it matters.** Termination is where agent loops fail expensively. Relying on the model to self-declare completion produces both premature stops and non-termination (looping on a failing tool, burning budget). Relying only on `max_steps` produces truncated work with no signal about *why* it stopped. Callers need to distinguish "finished", "hit the wall", "stuck", and "needs input" in order to retry, escalate, or surface to a user.
 
-**Options.**
+**Decision.** An ordered, composable `StopPolicy` chain; each policy returns `continue | stop(reason)`. Ships with `MaxStepsPolicy`, `BudgetPolicy` (tokens / cost / wall-clock), `NoProgressPolicy` (N consecutive steps with no state mutation), `FinishToolPolicy`, and `TodoCompletePolicy`. Callers append their own domain policies (e.g. "stop when the classification artifact exists").
 
-1. *Model self-declaration only* via a `finish` tool. Natural and clear intent, but no protection against non-termination.
-2. *Fixed built-in rules* (all TODOs done, or `max_steps`). Predictable but inflexible and gives poor stop-reason granularity.
-3. *Composable `StopPolicy` chain.* An ordered list of policies, each returning `continue | stop(reason)`. Ships with `MaxStepsPolicy`, `BudgetPolicy` (tokens/cost/wall-clock), `NoProgressPolicy` (N consecutive steps with no state mutation — the standard defence against loops), `FinishToolPolicy`, and `TodoCompletePolicy`. Callers append their own.
+`StepOutcome.status` is a discriminated `completed | max_steps | budget_exceeded | no_progress | awaiting_input | failed | cancelled`, and `stop_reason` names the policy that fired.
 
-**Recommendation: Option 3.** `StepOutcome.status` is a discriminated `completed | max_steps | budget_exceeded | no_progress | awaiting_input | failed | cancelled`, and `stop_reason` names the policy that fired. `NoProgressPolicy` is included in the default chain specifically because unproductive looping is the most common and most expensive real-world failure, and it is only detectable because DD-13 gives us a diffable state snapshot per step.
-
-**Your comment:**
->
->
+`NoProgressPolicy` is in the default chain specifically because unproductive looping is the most common and most expensive real-world failure — and it is only detectable because DD-13 gives us a diffable state snapshot per step.
 
 ---
 
-### DD-22: Long-Running Execution — In-Process Await vs. Externalized Continuation
+### DD-22: Long-Running Execution — `step()` as the Primitive, Drivers on Top
 
-**Issue.** "Manage short and long running executions." A run may be sub-second or may span hours across interrupts and bulk workflows. What is the execution contract?
+**Issue.** A run may be sub-second or may span hours across interrupts and bulk workflows. What is the execution contract?
 
-**Why it matters.** These are different operational shapes: short runs want low latency and simple ergonomics; long runs need to survive deploys, avoid holding worker slots, report progress, and be cancellable. If the harness only supports the blocking shape, long runs are impossible; if it only supports the continuation shape, simple use becomes needlessly painful and adoption suffers. Because DD-13 already externalizes state, supporting both is cheap — but the *contract* (who owns the scheduler?) must be explicit, or callers will build incompatible drivers.
+**Why it matters.** These are different operational shapes: short runs want low latency and simple ergonomics; long runs need to survive deploys, avoid holding worker slots, report progress, and be cancellable. If the harness only supports the blocking shape, long runs are impossible; if it only supports the continuation shape, simple use becomes needlessly painful. Because DD-13 already externalizes state, supporting both is cheap — but the contract (who owns the scheduler?) must be explicit, or callers will build incompatible drivers.
 
-**Options.**
+**Decision.** `AgentLoop.step()` is the sole primitive. Drivers sit on top:
 
-1. *Blocking `run()` only.* Simple; fails long runs.
-2. *Continuation only.* Caller drives every step. Maximally flexible, poor ergonomics for the common case.
-3. *`step()` as the primitive, with drivers on top.* `AgentLoop.step()` is the sole primitive. `LocalDriver` loops it in-process (short runs, CLI, tests). `QueueDriver` enqueues a continuation message after each step (long runs, distributed workers). Both are thin and use identical harness code — the only difference is who calls `step()`.
+- **`LocalDriver`** — loops `step()` in-process. Short runs, CLI, tests. **Ships with the harness.**
+- **`QueueDriver`** — enqueues a continuation message after each step. Long runs, distributed workers. **An adapter, not a core component** (§8), because queue semantics are a deployment concern the library should not opinionate on.
 
-**Recommendation: Option 3.** The harness ships `LocalDriver` only; `QueueDriver` is an adapter (Celery, SQS, Temporal, whatever the caller uses) because queue semantics are a deployment concern the library should not opinionate on. We publish the contract — *load state, step, save state, re-enqueue unless terminal* — plus a reference implementation in the docs.
+The published contract is: *load state → step → save state → re-enqueue unless terminal*, with a reference implementation in the docs.
 
-A `LockProvider` port prevents two workers stepping the same session concurrently; the in-memory default is a no-op, and Redis/Postgres advisory-lock adapters are provided for real deployments. Cancellation is cooperative: a `cancel_requested` flag on `SessionState` is checked at each step boundary, which is the only safe cancellation point given tools may be mid-flight.
-
-**Your comment:**
->
->
+A `LockProvider` port prevents two workers stepping the same session concurrently — no-op in-memory default, Redis/Postgres advisory-lock adapters later. Cancellation is cooperative: a `cancel_requested` flag on `SessionState` is checked at each step boundary, which is the only safe cancellation point given tools may be mid-flight.
 
 ---
 
-### DD-23: Reasoning Node Selection — Stream vs. Structured for the Loop's Core Call
+### DD-23: Reasoning Node Selection — An Explicit `ReasoningMode`
 
 **Issue.** Each step needs one LLM call that may emit both prose and tool calls. `LLMStreamNode` supports tools and reconstructs streamed tool calls; `LLMStructuredNode` returns tool calls non-streaming. Which drives the loop?
 
-**Why it matters.** This determines whether the harness can support real-time UI. Streaming is required for any interactive surface, and the existing `LLMStreamNode` already handles the hard part — reconstructing fragmented tool-call arguments across chunks. But streaming adds latency-to-first-tool-call complexity and makes some providers' structured-output guarantees weaker. Choosing wrong means either no streaming UI (a serious product gap) or a loop that cannot exploit strict structured outputs where they matter.
+**Why it matters.** Streaming is required for any interactive surface, and `LLMStreamNode` already handles the hard part — reconstructing fragmented tool-call arguments across chunks. But streaming buys nothing when nobody is watching: it adds reconstruction complexity, weakens some providers' strict structured-output guarantees, and costs latency-to-first-tool-call. Both shapes are genuinely needed, so the selection must be an explicit, inspectable setting rather than a hard-coded choice.
 
-**Options.**
+**Decision.** Introduce `ReasoningMode` on `AgentConfig`:
 
-1. *Structured only.* Simplest, strongest output guarantees, no streaming. Rejected — the UI gap is disqualifying.
-2. *Stream only.* Uniform and streaming-capable; slightly weaker guarantees for strict-schema cases.
-3. *Stream for reasoning, Structured for workflow workers.* The main loop uses `LLMStreamNode` (so events reach the UI and tool calls are reconstructed centrally). Deterministic workflow steps — where output must validate against `output_schema` and nobody is watching a stream — use `LLMStructuredNode`.
+```python
+class ReasoningMode(str, Enum):
+    AUTO = "auto"              # default — resolved per step (see below)
+    STREAM = "stream"          # LLMStreamNode  — UI / interactive surfaces
+    STRUCTURED = "structured"  # LLMStructuredNode — headless / workflow
+```
 
-**Recommendation: Option 3.** It uses each node where its guarantees actually matter and requires no new node types. Both paths share tool-argument validation (SG-05), so `ToolValidationError` remains the single retryable failure mode for malformed tool arguments in either path.
+Resolution rules, in order:
 
-**Your comment:**
->
->
+| Context | Resolved mode | Rationale |
+|---|---|---|
+| `AgentConfig.reasoning_mode` set explicitly | that mode | Caller knows their surface. |
+| `AUTO` **and** the `EventBus` has ≥1 subscriber for text-delta events | `STREAM` | Someone is plugged into a UI; deltas are worth producing. |
+| `AUTO` and no delta subscriber | `STRUCTURED` | Headless run — take the stronger schema guarantees and the simpler path. |
+| Inside `WorkflowEngine` (per-item worker) | `STRUCTURED` — **always, non-overridable** | Output must validate against `output_schema`; nobody is watching a stream. |
+| Subagent | inherits the parent's resolved mode unless the brief overrides it | Children are usually headless even when the parent streams. |
 
----
+Both paths funnel into a single internal `ReasoningResult` (`text`, `tool_calls`, `usage`), so the dispatch logic downstream of the call is mode-agnostic and only one code path handles tool dispatch. Both share tool-argument validation (SG-05), so `ToolValidationError` remains the single retryable failure mode for malformed tool arguments in either mode.
 
-### DD-24: Cognitive Tools — Prompt Instructions vs. Real Tool Calls
-
-**Issue.** Should the agent's self-management operations (write memory, update TODO, extract facts, record decisions) be tool calls, or should the model be asked to emit structured markers in its prose that we parse?
-
-**Why it matters.** Parsed markers are cheaper (no extra round-trip, no tool-schema tokens) but fragile — format drift breaks silently and produces an agent that appears to work while quietly losing all its state updates. Tool calls are validated, observable, and auditable (each produces a `ToolCallStarted`/`Finished` event), but consume schema tokens on every call and add round-trips. There is also a real risk of the model over-using cognitive tools and spending its whole budget on bookkeeping instead of the task.
-
-**Options.**
-
-1. *Prompt markers, parsed from prose.* Cheapest, most fragile. Rejected — silent state loss is the worst failure mode.
-2. *Full cognitive tool suite, always exposed.* Validated and observable; costs prompt tokens and invites bookkeeping loops.
-3. *Tool calls, with a minimal always-on core and the rest conditionally exposed.* `memory.write`, `todo.update`, and `finish` are always available. `todo.create`, `workflow.run`, `subagent.spawn`, `human.ask`, and `artifact.*` are exposed conditionally — only after the task is classified as complex, or once a plan exists.
-
-**Recommendation: Option 3.** It preserves validation and auditability while keeping the prompt small for trivial tasks, which is exactly the "don't create TODOs for trivial questions" requirement from the brief expressed as a mechanism rather than a plea in the prompt. Conditional exposure is implemented via `ToolFilter` (DD-16), so no special-casing leaks into the loop.
-
-The complexity classification the prior orchestrator did as a separate LLM call is instead folded into the first step: the model is given `todo.create` and simply doesn't call it for trivial tasks. This removes a full round-trip from every single run.
-
-**Your comment:**
->
->
+A caller wiring the harness into a UI therefore does exactly one thing — subscribe to the event stream — and streaming turns itself on.
 
 ---
 
-### DD-25: State Schema Evolution — Implicit vs. Versioned with Migrations
+### DD-24: Cognitive Tools — Real Tool Calls with Conditional Exposure
+
+**Issue.** Should the agent's self-management operations (write memory, update TODO, extract facts, record decisions) be tool calls, or structured markers parsed out of its prose?
+
+**Why it matters.** Parsed markers are cheaper but fragile — format drift breaks silently and produces an agent that appears to work while quietly losing all its state updates. Tool calls are validated, observable, and auditable, but consume schema tokens on every call. There is also a real risk of the model over-using cognitive tools and spending its budget on bookkeeping instead of the task.
+
+**Decision.** Cognitive operations are real tool calls, with a **minimal always-on core** and the rest **conditionally exposed**:
+
+- **Always on:** `internal.memory.write`, `internal.todo.update`, `internal.finish`.
+- **Conditional:** `internal.todo.create`, `internal.workflow.run`, `internal.subagent.spawn`, `internal.human.ask`, `internal.artifact.*` — exposed only once a plan exists or the task is classified as complex.
+
+This preserves validation and auditability while keeping the prompt small for trivial tasks — the "don't create TODOs for trivial questions" requirement expressed as a mechanism rather than a plea in the prompt. Conditional exposure is implemented via `ToolFilter` (DD-16), so no special-casing leaks into the loop.
+
+The complexity classification the prior orchestrator performed as a separate LLM call is folded into the first step: the model is given `todo.create` and simply doesn't call it for trivial tasks. That removes a full round-trip from every run.
+
+---
+
+### DD-25: State Schema Evolution — Versioned Now, Migrations Later
 
 **Issue.** Once `SessionState` and `MemoryRecord` are persisted in a caller's database, changing their shape breaks stored data. Do we plan for this now or react later?
 
-**Why it matters.** This is cheap now and very expensive later. The moment a user has in-flight sessions in Postgres, any field rename becomes a migration problem *in their infrastructure*, not ours. Long-running sessions (DD-22) mean a session may be written by version N and read by N+1 after a deploy — so cross-version reads are not an edge case, they are the normal case for any run spanning a release. Without a version field there is no way to even detect the mismatch; the failure is a confusing Pydantic validation error at resume time.
+**Why it matters.** This is cheap now and very expensive later. The moment a user has in-flight sessions in Postgres, any field rename becomes a migration problem *in their infrastructure*, not ours. Long-running sessions (DD-22) mean a session may be written by version N and read by N+1 after a deploy — so cross-version reads are the normal case for any run spanning a release. Without a version field there is no way to even detect the mismatch; the failure is a confusing Pydantic validation error at resume time.
 
-**Options.**
+**Decision.** `schema_version: int` on `SessionState`, `MemoryRecord`, `WorkflowSpec`, and `ArtifactMeta` from Phase 1, with `SchemaVersionError` raised on mismatch — converting silent corruption into an actionable message. A documented hook is left where the migration registry will attach.
 
-1. *No versioning.* Free now, unbounded pain later. Rejected.
-2. *Version field only.* `schema_version: int` on persisted models; on mismatch, fail loudly with a clear error. Nearly free, converts a silent corruption into an actionable message. Does not actually migrate anything.
-3. *Version plus a migration registry.* `@migration(from=1, to=2)` functions applied on load. Full forward compatibility, but real machinery to build and test before we have any schemas worth migrating.
-
-**Recommendation: Option 2 now, Option 3 when it is needed.** Add `schema_version` to `SessionState`, `MemoryRecord`, `WorkflowSpec`, and `ArtifactMeta` from Phase 1, with a `SchemaVersionError` raised on mismatch. Leave a documented hook where the migration registry will attach. The version field costs nothing and is impossible to add retroactively to already-persisted data; the migration machinery costs a lot and is easy to add later.
-
-**Your comment:**
->
->
+The **migration registry itself is deferred** (§8): the version field costs nothing and is impossible to add retroactively to already-persisted data; the migration machinery costs a lot and is easy to add once there is a schema worth migrating.
 
 ---
 
-## 5. Suggestions
+## 5. Adopted Suggestions
 
-Non-blocking recommendations. Each is additive and can be adopted independently.
+Non-blocking recommendations, all **accepted** and scheduled. Each is additive and can be adopted independently. Suggestions that were accepted *in principle but deferred* appear in [§8](#8-deferred-to-later-versions) instead.
+
+| ID | Suggestion | Adopted in |
+|---|---|---|
+| SG-06 | Persist the event stream as the audit trail | Phase 2 (port) / Phase 7 (backend) |
+| SG-07 | Per-step cost and token accounting | Phase 1 (fields) / Phase 2 (enforcement) |
+| SG-08 | Tool-result truncation with artifact spillover | Phase 3 |
+| SG-09 | `ContextAssembled` debug event | Phase 3 |
+| SG-10 | Prompt-caching-aware section ordering | Phase 3 |
+| SG-11 | Idempotency keys on tool invocations | Phase 4 |
+| SG-13 | Structured concurrency for parallel tool calls | Phase 4 |
+| SG-14 | Redaction hooks before persistence and emission | Phase 1 (seam) / Phase 7 (impl) |
+
+SG-12 (trace-based evaluation harness) was accepted but deferred — see [DF-10](#8-deferred-to-later-versions).
 
 ### SG-06: Persist the Event Stream as the Audit Trail
 
-`SessionState` snapshots give current state; the `AgentEvent` stream gives *how we got here*. Persisting events (via an `EventSink` port with a no-op default) gives audit, cost attribution, replay for debugging, and training data for evaluation — without paying for full event sourcing (DD-13). Recommended from Phase 2, since events are already being emitted and the incremental cost is one port.
+`SessionState` snapshots give current state; the `AgentEvent` stream gives *how we got here*. Persisting events (via an `EventSink` port with a no-op default) gives audit, cost attribution, replay for debugging, and training data for evaluation — without paying for full event sourcing (DD-13). Adopted from Phase 2, since events are already being emitted and the incremental cost is one port.
 
 ### SG-07: Per-Step Cost and Token Accounting as a First-Class Field
 
@@ -482,10 +444,6 @@ Anthropic and OpenAI both offer substantial discounts for stable prompt prefixes
 ### SG-11: Idempotency Keys on Tool Invocations
 
 In a distributed setup (DD-22), a worker can crash after invoking a tool but before saving state, causing re-execution on resume. For side-effecting tools this is a correctness bug, not a performance one. Give each tool invocation a deterministic `idempotency_key` (session + step + call index) and let `ToolProvider` implementations honour it. Also enables safe at-least-once queue delivery.
-
-### SG-12: A Trace-Based Evaluation Harness
-
-Once real runs exist, capture traces as fixtures and replay them against the loop with a recording adapter. This converts prompt and policy changes from unfalsifiable judgement calls into regression tests. Gated on maturity — it needs real traces first — but worth designing the recording adapter early so traces are being captured before we need them.
 
 ### SG-13: Structured Concurrency for Parallel Tool Calls
 
@@ -617,8 +575,13 @@ class ToolScope(str, Enum):                       # DD-16
     MCP = "mcp"
     SUBAGENT = "subagent"
 
+class ToolOrigin(str, Enum):                      # DD-16 — "internal." is reserved
+    INTERNAL = "internal"
+    EXTERNAL = "external"
+
 class HarnessTool(BaseModel):
-    namespace: str
+    origin: ToolOrigin
+    namespace: str                                # no "." and no "__" inside a segment
     definition: ToolDefinition                    # reuses spec 01 model
     scope: ToolScope
     provider_id: str | None = None
@@ -628,10 +591,17 @@ class HarnessTool(BaseModel):
 
     @property
     def qualified_name(self) -> str:
-        return f"{self.namespace}:{self.definition.name}"
+        return f"{self.origin.value}.{self.namespace}.{self.definition.name}"
+
+# Adapter-level, not core: providers that reject "." in function names.
+def encode_tool_name(qualified: str) -> str:      # "external.github.create_issue"
+    return qualified.replace(".", "__")           # -> "external__github__create_issue"
+
+def decode_tool_name(wire: str) -> str:
+    return wire.replace("__", ".")
 
 class ToolResult(BaseModel):
-    tool_name: str
+    tool_name: str                                # always the dotted qualified name
     call_id: str | None = None
     ok: bool = True
     output: str = ""
@@ -710,9 +680,20 @@ class BudgetPolicy(BaseModel):                    # SG-07
     max_cost: float | None = None
     max_wall_clock_s: float | None = None
 
+class ReasoningMode(str, Enum):                   # DD-23
+    AUTO = "auto"
+    STREAM = "stream"
+    STRUCTURED = "structured"
+
+class ReasoningResult(BaseModel):                 # DD-23 — unified output of either mode
+    text: str = ""
+    tool_calls: list[ToolCallResult] = Field(default_factory=list)
+    usage: "StepUsage" = Field(default_factory=StepUsage)
+
 class AgentConfig(BaseModel):
     llm: LLMConfig                                # reuses spec 01 model
     persona: AgentPersona = Field(default_factory=AgentPersona)
+    reasoning_mode: ReasoningMode = ReasoningMode.AUTO   # DD-23
     max_steps: int = 20
     max_subagent_depth: int = 2
     max_parallel_tools: int = 4
@@ -807,6 +788,7 @@ Extends the existing `LLMError` hierarchy so a single `except LLMError` still ca
 | `MaxStepsExceededError` | `harness` | `False` | Step ceiling hit (DD-21). |
 | `NoProgressError` | `harness` | `False` | `NoProgressPolicy` fired (DD-21). |
 | `ToolNotFoundError` | `harness` | `False` | Model called an unregistered tool. |
+| `ToolNamespaceError` | `harness` | `False` | Registration under the reserved `internal.` prefix, or a segment containing `.` / `__` (DD-16). |
 | `ToolExecutionError` | `harness` | varies | Provider-side tool failure; `retryable` set by the provider. |
 | `InterruptTimeoutError` | `harness` | `False` | `InterruptRequest.timeout_at` elapsed (DD-18). |
 | `WorkflowError` | `harness` | `False` | Workflow validation or fatal execution failure (DD-17). |
@@ -817,23 +799,68 @@ Extends the existing `LLMError` hierarchy so a single `except LLMError` still ca
 
 ## 7. Implementation Phases
 
-Phases 1–5 are **buildable now** with the information on hand. Phases 6–8 are **maturity-gated**: each names the concrete signal required before starting, because designing them without real traces risks abstractions that fit no real workload.
+Phases 0–5 are **buildable now** with the information on hand. Phases 6–8 are **maturity-gated**: each names the concrete signal required before starting, because designing them without real traces risks abstractions that fit no real workload. Deferred work that belongs to no phase is listed in [§8](#8-deferred-to-later-versions).
+
+### Complexity scale and model assignment
+
+Each deliverable is rated so implementation can be routed to the cheapest model that can do it safely.
+
+| Level | Character of the work | Assign to |
+|---|---|---|
+| **C4 — Architectural** | Defines a contract everything else depends on; the failure mode is an irreversible design error, not a bug. Ports, state model, loop state machine, budget/eviction ordering, workflow resumability. | **Opus 5** |
+| **C3 — High** | Concurrency, state machines, provider quirks, non-obvious algorithms. Correct-looking code can be subtly wrong. | **Opus 5**, or **Sonnet 5** with an Opus 5 design note and review |
+| **C2 — Moderate** | Implementation against a contract that is already fully written down. Judgement needed, but the shape is fixed. | **Sonnet 5** |
+| **C1 — Mechanical** | Boilerplate, in-memory adapters, tests derived from a written table, examples, docstrings, code motion. | **GPT-Luna** |
+
+**Routing rules**
+
+1. **Contract first.** For any C4 item, Opus 5 writes the ABCs, Pydantic models, docstrings, and the test table *before* any C2/C1 work starts against it. Smaller models fill in; they never define the seam.
+2. **Never split a C4 item.** Architectural items go to one model in one pass; a split contract is how inconsistencies enter.
+3. **Review gate.** C1/C2 output is accepted only against the phase's stated exit criteria, not by inspection.
+4. **Escalate on a second failed attempt.** If a C2 item fails its tests twice, it was mis-rated — re-route up one level.
+5. **Tests inherit the rating of what they test**, except pure fixture/boilerplate tests, which are always C1.
+
+Phase-level rating is the maximum of its items.
+
+### Phase 0 — Pre-flight (unblocks Phase 1)
+
+**Goal:** Clear the concrete blockers identified in [§9](#9-development-readiness) so Phase 1 starts on a green tree.
+
+| Deliverable | Complexity | Model |
+|---|---|---|
+| Re-land `nodes/function_node.py` + `FunctionResult` from `build/lib` into the live tree, with tests | C1 | GPT-Luna |
+| Remove the stale `build/` tree from the repo and add it to `.gitignore` (it is a second, divergent source of truth today) | C1 | GPT-Luna |
+| Remove the empty `rh_cognitv/agents/` package — the harness lives in `rh_cognitv/harness/` | C1 | GPT-Luna |
+| Gate provider integration tests on **SDK availability** as well as API key (they currently fail, not skip, when `openai` is absent) | C1 | GPT-Luna |
+| Add `ruff` + `mypy` to `requirements_dev.txt` — a `ruff` config exists with no linter installed | C1 | GPT-Luna |
+| Decide and document where the [02_agent_context](./02_agent_context) prompt ships (package resource vs. default `AgentPersona` text) | C2 | Sonnet 5 |
+
+**Exit criteria:** `pytest -q` is fully green with no provider SDKs installed; `FunctionNode` is importable from `rh_cognitv.nodes`; `ruff check` and `mypy` run clean on the live tree.
+
+**Phase rating: C2 — Sonnet 5 leads, GPT-Luna executes.**
 
 ### Phase 1 — Ports, State, Events, Errors
 
 **Goal:** Establish every dependency-inversion boundary and the serializable state model before any logic depends on them.
 
 **Deliverables:**
-- `harness/ports/*` — `SessionStore`, `MemoryStore`, `ArtifactStore`, `BlobStore`, `ToolProvider`, `Tokenizer`, `LockProvider`, `Clock`, `IdGenerator`, `VectorIndex` (declared, unimplemented)
-- `harness/state.py` — `SessionState`, `Step`, `TodoList`, `Plan`, `RunStatus`, `StepUsage`, all with `schema_version` (DD-25)
-- `harness/events.py` — `AgentEvent` discriminated union, ported and extended from the `build/lib` prototype
-- `harness/errors.py` — the taxonomy above, extending `LLMError`
-- `harness_adapters/memory_backend.py` — in-memory implementations of all ports so the harness runs with zero configuration
-- Re-land `nodes/function_node.py` (`FunctionNode`, `FunctionResult`) from `build/lib` into the live tree
+
+| Deliverable | Complexity | Model |
+|---|---|---|
+| `harness/ports/*` — `SessionStore` (optimistic concurrency), `MemoryStore`, `ArtifactStore`, `BlobStore`, `ToolProvider`, `Tokenizer`, `LockProvider`, `Clock`, `IdGenerator`, `VectorIndex` (declared, unimplemented) | **C4** | Opus 5 |
+| `harness/state.py` — `SessionState`, `Step`, `TodoList`, `Plan`, `RunStatus`, `StepUsage`, all with `schema_version` (DD-25) and cost fields (SG-07) | **C4** | Opus 5 |
+| `harness/errors.py` — the taxonomy above, extending `LLMError` | C2 | Sonnet 5 |
+| `harness/events.py` — `AgentEvent` discriminated union, ported and extended from the `build/lib` prototype | C2 | Sonnet 5 |
+| `Redactor` seam declared (no-op default) before any persistence lands (SG-14) | C2 | Sonnet 5 |
+| Default `Tokenizer` — heuristic estimator, **no new dependency**; `tiktoken`-backed variant is an optional adapter | C2 | Sonnet 5 |
+| `harness_adapters/memory_backend.py` — in-memory implementations of every port | C1 | GPT-Luna |
+| Serialization round-trip and ABC-conformance tests | C1 | GPT-Luna |
 
 **Tests:** Round-trip serialization of every persisted model; `schema_version` mismatch raises `SchemaVersionError`; optimistic-concurrency conflict on `SessionStore.save()`; in-memory adapters satisfy their ABCs.
 
 **Exit criteria:** A `SessionState` survives `model_dump_json()` → `model_validate_json()` losslessly. No module under `harness/` imports from `harness_adapters/`.
+
+**Phase rating: C4 — Opus 5 leads.** This phase fixes every seam in the system; it is the single worst place to economize on model capability.
 
 ---
 
@@ -842,17 +869,26 @@ Phases 1–5 are **buildable now** with the information on hand. Phases 6–8 ar
 **Goal:** The smallest thing that is genuinely an agent: multi-step, tool-calling, persisted after every step.
 
 **Deliverables:**
-- `harness/loop.py` — `AgentLoop.step()` (DD-13, DD-22), `AgentConfig`, `StepOutcome`, `LocalDriver`, and the convenience `run()` wrapper
-- `harness/tools/registry.py` + `spec.py` — `ToolRegistry`, `HarnessTool`, `ToolResult`, `ToolFilter` (DD-16)
-- `harness/tools/cognitive.py` — the always-on core: `memory.write`, `todo.update`, `finish` (DD-24)
-- `harness/policy.py` — `MaxStepsPolicy`, `FinishToolPolicy`, `NoProgressPolicy` (DD-21)
-- `harness/context/assembler.py` — first `ContextAssembler`: state header + bounded raw window (DD-15)
-- Reasoning call via `LLMStreamNode` with tools (DD-23); events published to `EventBus`
-- `FunctionToolProvider` wrapping `FunctionNode` instances
 
-**Tests:** Fake adapter scripting multi-step tool-call sequences; state persisted and reloaded between steps; each stop policy fires correctly; `NoProgressPolicy` halts a deliberately stuck loop; tool-name collisions resolve deterministically.
+| Deliverable | Complexity | Model |
+|---|---|---|
+| `harness/loop.py` — `AgentLoop.step()` state machine, `StepOutcome`, `AgentConfig` (DD-13, DD-22) | **C4** | Opus 5 |
+| `ReasoningMode` resolution + unified `ReasoningResult` over stream/structured paths (DD-23) | C3 | Opus 5 |
+| `harness/tools/registry.py` + `spec.py` — dotted identity, reserved `internal.` prefix, collision rules, `ToolFilter` (DD-16) | C3 | Opus 5 |
+| `OpenAIAdapter` tool-name codec (`.` ⇄ `__`) with round-trip tests (DD-16) — a change to shipped code | C2 | Sonnet 5 |
+| `harness/policy.py` — `MaxStepsPolicy`, `FinishToolPolicy`, `NoProgressPolicy` (DD-21) | C2 | Sonnet 5 |
+| `harness/tools/cognitive.py` — always-on core: `internal.memory.write`, `internal.todo.update`, `internal.finish` (DD-24) | C2 | Sonnet 5 |
+| `harness/context/assembler.py` — first `ContextAssembler`: state header + bounded raw window (DD-15) | C3 | Sonnet 5 + Opus 5 review |
+| `EventSink` port and per-step usage aggregation (SG-06, SG-07) | C2 | Sonnet 5 |
+| `LocalDriver` and the `run()` convenience wrapper | C1 | GPT-Luna |
+| `FunctionToolProvider` wrapping `FunctionNode` instances | C1 | GPT-Luna |
+| Fake adapter scripting multi-step tool-call sequences + tests | C1 | GPT-Luna |
+
+**Tests:** Fake adapter scripting multi-step tool-call sequences; state persisted and reloaded between steps; each stop policy fires correctly; `NoProgressPolicy` halts a deliberately stuck loop; tool-name collisions resolve deterministically; registering under `internal.` raises `ToolNamespaceError`.
 
 **Exit criteria:** An agent completes a 3-tool task, is killed mid-run, and resumes from the persisted session on a fresh `AgentLoop` instance with identical results.
+
+**Phase rating: C4 — Opus 5 leads.** The step state machine and tool identity are the two things everything after this phase builds on.
 
 ---
 
@@ -861,17 +897,21 @@ Phases 1–5 are **buildable now** with the information on hand. Phases 6–8 ar
 **Goal:** Typed memory with enforced policies, and a context assembler that never silently drops information.
 
 **Deliverables:**
-- `harness/memory/models.py` — `MemoryRecord`, `MemoryKind`, `MemoryScope`, `MemoryQuery` (DD-14)
-- `harness/memory/policy.py` + `service.py` — retention, promotion (observation → fact), and recall
-- Cognitive tools: `memory.read`, `memory.promote`, `notes.append`
-- `harness/context/budget.py` — `TokenBudget` with the State > Decisions > Facts > Observations priority from [02_agent_context](./02_agent_context)
-- Eviction routes through `MemoryService` — never a silent delete (DD-15)
-- `ContextAssembled` event with per-section token breakdown (SG-09); stable-prefix section ordering (SG-10)
-- Tool-result truncation with artifact spillover (SG-08)
+
+| Deliverable | Complexity | Model |
+|---|---|---|
+| `harness/context/budget.py` — `TokenBudget` with the State > Decisions > Facts > Observations eviction order, and compaction-on-eviction into `MemoryService` (DD-15) | **C4** | Opus 5 |
+| `harness/memory/policy.py` + `service.py` — retention, promotion (observation → fact), recall | C3 | Opus 5 |
+| `harness/memory/models.py` — `MemoryRecord`, `MemoryKind`, `MemoryScope`, `MemoryQuery` (DD-14) | C2 | Sonnet 5 |
+| Tool-result truncation with artifact spillover (SG-08) | C2 | Sonnet 5 |
+| Cognitive tools: `internal.memory.read`, `internal.memory.promote`, `internal.notes.append` | C1 | GPT-Luna |
+| `ContextAssembled` event with per-section token breakdown (SG-09); stable-prefix section ordering (SG-10) | C1 | GPT-Luna |
 
 **Tests:** Observation eviction respects `max_active_observations` while decisions survive; budget overflow evicts in priority order; evicted content is recoverable from memory; a large tool result spills to an artifact and leaves a working reference.
 
 **Exit criteria:** A 30-step run stays within `context_token_budget` and can still cite a decision made at step 2.
+
+**Phase rating: C4 — Opus 5 leads.** Eviction ordering is the least mechanically verifiable component in the system; a plausible-but-wrong implementation degrades answers silently.
 
 ---
 
@@ -880,16 +920,21 @@ Phases 1–5 are **buildable now** with the information on hand. Phases 6–8 ar
 **Goal:** Bounded parallel exploration with context isolation.
 
 **Deliverables:**
-- `harness/ports/artifact_store.py` implementation + `harness_adapters/filesystem.py` (local session/artifact/blob store)
-- Cognitive tools: `artifact.write`, `artifact.read`, `artifact.list`
-- `harness/workflow/subagent.py` — `SubagentRunner`, `SubagentResult`, depth capping, budget inheritance (DD-20)
-- `subagent.spawn` tool with an explicit brief and a restricted tool subset
-- Parallel tool execution under `TaskGroup` with `max_parallel_tools` (SG-13)
-- Idempotency keys on tool invocations (SG-11)
+
+| Deliverable | Complexity | Model |
+|---|---|---|
+| `harness/workflow/subagent.py` — `SubagentRunner`, `SubagentResult`, context isolation, depth capping, budget inheritance (DD-20) | C3 | Opus 5 |
+| Parallel tool execution under `asyncio.TaskGroup` with `max_parallel_tools`, result ordering, and cancellation semantics (SG-13) | C3 | Opus 5 |
+| Idempotency keys on tool invocations (SG-11) | C2 | Sonnet 5 |
+| `subagent.spawn` tool with an explicit brief and a restricted tool subset | C2 | Sonnet 5 |
+| `harness_adapters/filesystem.py` — local session / artifact / blob store | C1 | GPT-Luna |
+| Cognitive tools: `internal.artifact.write`, `internal.artifact.read`, `internal.artifact.list` | C1 | GPT-Luna |
 
 **Tests:** Subagent context is isolated (parent window unchanged apart from the single summary observation); depth cap enforced; child budget deducted from parent; parallel tool results preserve call order; repeated invocation with the same idempotency key executes once.
 
 **Exit criteria:** A parent agent spawns 5 concurrent explorers and its own context grows by 5 summaries, not 5 transcripts.
+
+**Phase rating: C3 — Opus 5 leads the concurrency and isolation items; GPT-Luna does the filesystem adapter and artifact tools.**
 
 ---
 
@@ -898,16 +943,20 @@ Phases 1–5 are **buildable now** with the information on hand. Phases 6–8 ar
 **Goal:** The 300-document scenario, executed deterministically and resumably.
 
 **Deliverables:**
-- `harness/workflow/models.py` — `WorkflowSpec`, `StepSpec`, `ForEachSpec`, `WorkflowResult` (DD-17)
-- `harness/workflow/engine.py` — `Sequence`, `ForEach` (with `max_concurrency`), `Map`, `Reduce`
-- Per-item workers use `LLMStructuredNode` against `output_schema` (DD-23)
-- Per-item results written to `ArtifactStore`; a manifest artifact returned to the parent
-- `workflow.run` cognitive tool, exposed conditionally (DD-24)
-- Workflow progress checkpointed into `SessionState` so a mid-workflow crash resumes at the next unprocessed item
+
+| Deliverable | Complexity | Model |
+|---|---|---|
+| `harness/workflow/engine.py` — `Sequence`, `ForEach` (with `max_concurrency`), `Map`, `Reduce`, plus per-item checkpointing into `SessionState` so a mid-workflow crash resumes at the next unprocessed item | **C4** | Opus 5 |
+| Per-item workers pinned to `LLMStructuredNode` against `output_schema` (DD-23) | C2 | Sonnet 5 |
+| `harness/workflow/models.py` — `WorkflowSpec`, `StepSpec`, `ForEachSpec`, `WorkflowResult` (DD-17) | C2 | Sonnet 5 |
+| `internal.workflow.run` cognitive tool, exposed conditionally (DD-24) | C1 | GPT-Luna |
+| Per-item results written to `ArtifactStore`; manifest artifact returned to the parent | C1 | GPT-Luna |
 
 **Tests:** `ForEach` over 100 fake items respects `max_concurrency`; per-item failures are isolated under `continue_on_error`; a crash at item 50 resumes at item 50, not item 0; outputs validate against `output_schema`.
 
 **Exit criteria:** 300 documents classified in a single agent run, with the parent context growing by one summary and one manifest reference.
+
+**Phase rating: C4 — Opus 5 leads.** Resumable partial fan-out is the hard part; everything else in the phase is straightforward once the engine's checkpoint contract exists.
 
 ---
 
@@ -916,14 +965,19 @@ Phases 1–5 are **buildable now** with the information on hand. Phases 6–8 ar
 **Gate:** A concrete integration exists that owns a transport (webhook, queue, or UI). Interrupt ergonomics are unknowable without a real consumer, and building the resume API against an imagined one guarantees rework.
 
 **Deliverables:**
-- `harness/interrupt.py` — `InterruptRequest`, `Resumption` (DD-18)
-- `AgentLoop.resume(session_id, resumption)`
-- `human.ask` and `agent.ask` tools
-- Approval gating via `HarnessTool.requires_approval`, reusing the same suspend/resume path
-- `InteractiveResponder` adapter for synchronous CLI use
-- Timeout handling driven by the caller's scheduler
+
+| Deliverable | Complexity | Model |
+|---|---|---|
+| `AgentLoop.resume(session_id, resumption)` and the suspend path through `StepOutcome` | C3 | Opus 5 |
+| Approval gating via `HarnessTool.requires_approval`, reusing the same suspend/resume path | C2 | Sonnet 5 |
+| `harness/interrupt.py` — `InterruptRequest`, `Resumption` (DD-18) | C2 | Sonnet 5 |
+| `internal.human.ask` and `internal.agent.ask` tools | C1 | GPT-Luna |
+| `InteractiveResponder` adapter for synchronous CLI use | C1 | GPT-Luna |
+| Timeout handling driven by the caller's scheduler (documented contract, no scheduler shipped) | C1 | GPT-Luna |
 
 **Exit criteria:** An agent suspends on a clarification, the process exits entirely, and a new process resumes it from persisted state with the answer injected.
+
+**Phase rating: C3 — Opus 5 for the resume path, Sonnet 5/GPT-Luna for the rest.**
 
 ---
 
@@ -932,15 +986,20 @@ Phases 1–5 are **buildable now** with the information on hand. Phases 6–8 ar
 **Gate:** At least one real deployment with a chosen infrastructure stack. Writing a Postgres schema before knowing the query patterns — and the actual size distribution of sessions and memory — produces a schema that will be rewritten.
 
 **Deliverables:**
-- `harness_adapters/sqlalchemy_backend.py` — session + memory + artifact-metadata stores `[harness-sql]`
-- `harness_adapters/redis_backend.py` — session store and `LockProvider` `[harness-redis]`
-- `harness_adapters/s3_backend.py` — `BlobStore` `[harness-s3]`
-- `QueueDriver` reference implementation and the documented continuation contract (DD-22)
-- `EventSink` port and a persisted event trail (SG-06)
-- `Redactor` port applied before persistence and emission (SG-14)
-- Migration registry hook activated if a schema change has landed (DD-25)
+
+| Deliverable | Complexity | Model |
+|---|---|---|
+| `QueueDriver` reference implementation and the documented continuation contract (DD-22) | C3 | Opus 5 |
+| `harness_adapters/sqlalchemy_backend.py` — session + memory + artifact-metadata stores `[harness-sql]` | C3 | Opus 5 |
+| Migration registry activated if a schema change has landed (DD-25) | C3 | Opus 5 |
+| `harness_adapters/redis_backend.py` — session store and `LockProvider` `[harness-redis]` | C2 | Sonnet 5 |
+| `Redactor` implementation applied before persistence and emission (SG-14) | C2 | Sonnet 5 |
+| `harness_adapters/s3_backend.py` — `BlobStore` `[harness-s3]` | C1 | GPT-Luna |
+| Persisted event trail behind the existing `EventSink` port (SG-06) | C1 | GPT-Luna |
 
 **Exit criteria:** A single session is stepped by two different worker processes without state loss or lock contention.
+
+**Phase rating: C3 — Opus 5 for the concurrency-sensitive stores and the driver contract.**
 
 ---
 
@@ -949,33 +1008,93 @@ Phases 1–5 are **buildable now** with the information on hand. Phases 6–8 ar
 **Gate:** Distinct signals per item — MCP requires a target server worth integrating; semantic recall requires memory volumes where keyword and kind filtering demonstrably fail; evaluation requires a corpus of real traces.
 
 **Deliverables:**
-- `harness_adapters/mcp_provider.py` — MCP `ToolProvider` with dynamic discovery `[harness-mcp]`
-- `VectorIndex` implementation and embedding-backed `MemoryQuery.text` recall, using the existing `LLMEmbeddingNode`
-- Trace recording adapter and replay-based regression suite (SG-12)
-- `PricingTable` and cost dashboards (SG-07)
+
+| Deliverable | Complexity | Model |
+|---|---|---|
+| `VectorIndex` implementation and embedding-backed `MemoryQuery.text` recall, using the existing `LLMEmbeddingNode` | C3 | Opus 5 |
+| Trace recording adapter and replay-based regression suite (SG-12) | C3 | Opus 5 |
+| `harness_adapters/mcp_provider.py` — MCP `ToolProvider` with dynamic discovery `[harness-mcp]` | C2 | Sonnet 5 |
+| `PricingTable` (caller-supplied) and cost reporting (SG-07) | C1 | GPT-Luna |
 
 **Exit criteria:** MCP tools are callable without any core change; semantic recall measurably beats keyword recall on a real corpus; a prompt change can be evaluated against recorded traces before merge.
 
+**Phase rating: C3 — Opus 5 for recall and evaluation; MCP is a straightforward port implementation.**
+
 ---
 
-## 8. What to Build Now vs. What to Wait For
+## 8. Deferred to Later Versions
 
-| Now (Phases 1–5) | Wait (Phases 6–8) | Why wait |
-|---|---|---|
-| Ports, `SessionState`, `schema_version` | Migration registry (DD-25) | No schemas to migrate yet; the version field is the part that must exist now. |
-| Loop, stop policies, cognitive tool core | Interrupt / resume (DD-18) | Transport ownership is the unknown; the state model already supports it. |
-| Typed memory + retention/promotion | Semantic recall via `VectorIndex` | Relevance tuning needs real volume; the port and `embedding_ref` field are pre-placed. |
-| Bounded context window + eviction to memory | Learned or adaptive compaction | Requires traces to evaluate against (SG-12). |
-| In-memory + filesystem adapters | Postgres / Redis / S3 adapters | Schema follows real query patterns, not speculation. |
-| `FunctionToolProvider`, `ToolRegistry`, scopes | MCP provider | The port makes MCP purely additive whenever a target appears. |
-| `ForEach` / `Map` / `Reduce` / `Sequence` | Conditionals, dynamic loops, arbitrary DAGs | Avoids accidentally designing a programming language before a workload demands one. |
-| Per-step token and cost accounting | `PricingTable` + dashboards | Accounting must be structural from day one; pricing data goes stale and belongs to the caller. |
+Everything below was **considered and accepted in principle, but deliberately not built in v1**. Each item names the seam that exists today so the work stays purely additive, and the concrete trigger that should start it.
 
 The organising principle: **build every seam now, defer every implementation that needs empirical data.** Ports, versioning, and accounting fields are cheap now and prohibitively expensive to retrofit. Policies, schemas, and heuristics are the opposite — cheap later, and near-certainly wrong if guessed at now.
 
+| ID | Deferred item | Source | Seam that exists now | Trigger to build |
+|---|---|---|---|---|
+| DF-01 | Event-sourced state (fold/projection) and `jsonpatch` delta encoding of sessions | DD-13 | Per-step snapshots + persisted event stream; `jsonpatch` is already a dependency | Session snapshots become large enough that per-step full writes dominate storage or latency |
+| DF-02 | Migration registry (`@migration(from=N, to=N+1)`) | DD-25 | `schema_version` on every persisted model + `SchemaVersionError` | The first breaking schema change with sessions already in someone's database |
+| DF-03 | `QueueDriver` (Celery / SQS / Temporal) | DD-22 | `step()` primitive + documented continuation contract + `LockProvider` port | A deployment that cannot hold a worker slot for a whole run |
+| DF-04 | Production persistence adapters (Postgres, Redis, S3) | DD-19, Phase 7 | Four segregated store ports with in-memory + filesystem defaults | One real deployment with a chosen infrastructure stack |
+| DF-05 | Human/agent-in-the-loop transports | DD-18, Phase 6 | `awaiting_input` status and persisted-state model already support suspension | An integration that owns a transport (webhook, queue, UI) |
+| DF-06 | Semantic recall (`VectorIndex` implementation, embedding-backed `MemoryQuery.text`) | DD-19, Phase 8 | `VectorIndex` port declared; `MemoryRecord.embedding_ref` pre-placed; `LLMEmbeddingNode` already ships | Memory volumes where kind/tag/keyword filtering demonstrably fails |
+| DF-07 | MCP tool provider | DD-16, Phase 8 | `ToolProvider` port + dotted namespacing designed for runtime-discovered names | A target MCP server worth integrating |
+| DF-08 | Workflow conditionals, dynamically terminating loops, arbitrary DAGs | DD-17 | `WorkflowSpec.schema_version` so the vocabulary grows additively | A real workload that `Sequence`/`ForEach`/`Map`/`Reduce` cannot express |
+| DF-09 | Learned or adaptive context compaction | DD-15 | `ContextAssembler` is a swappable port; eviction already routes through `MemoryService` | Recorded traces to evaluate a compaction strategy against (needs DF-10) |
+| DF-10 | Trace-based evaluation harness | SG-12 | `EventBus` + `EventSink` produce the raw material from Phase 2 | A corpus of real runs; design the recording adapter early so traces accumulate first |
+| DF-11 | `PricingTable` and cost dashboards | SG-07 | `StepUsage.estimated_cost` and `BudgetPolicy` are structural from Phase 1 | A caller who needs cost attribution; pricing data goes stale and belongs to them |
+| DF-12 | Multi-modal inputs | [future.md](./future.md) #7 | `ArtifactStore` / `BlobStore` are the intended carriers | Requires the `Message.content` change noted in future.md |
+| DF-13 | Anthropic adapter | [future.md](./future.md) #9 | Adapter ABCs; the harness is provider-agnostic by construction | Independent of this spec |
+
 ---
 
-## 9. Deferred Items
+## 9. Development Readiness
+
+Assessed against the live tree, not the spec.
+
+### What is ready
+
+| Signal | State |
+|---|---|
+| Node layer (spec 01) | Complete — `LLMTextNode`, `LLMStreamNode`, `LLMStructuredNode`, `LLMEmbeddingNode` in `rh_cognitv/nodes/llm/` |
+| Provider adapters | Two shipped (`OpenAIAdapter`, `GeminiAdapter`) against the same ABCs — provider neutrality is proven, not theoretical |
+| Canonical contracts | `Message`, `LLMConfig`, `ToolDefinition`, `ToolCallResult`, `TokenUsage`, `LLMResultMeta` all exist and are re-exported |
+| Error taxonomy | `LLMError` with `family` / `code` / `retryable`; the harness taxonomy extends it rather than competing with it |
+| Test suite | 227 unit tests passing, fake-adapter pattern already established — the harness can be tested the same way |
+| Dependencies | `pydantic`, `jsonpatch`, `ulid-py`, `jsonschema` already declared; **Phases 0–5 need no new runtime dependency** |
+| Prior art | `build/lib/rh_cognitv/` holds a working `EventBus` (165 LOC), `ActiveContext` (214), `AgentOrchestrator` (465), `FunctionNode` (67) to port from |
+| Written cognitive model | [02_agent_context](./02_agent_context) (677 lines) defines the memory lifecycle and context budget the harness encodes as types |
+
+### Blockers — all cleared by Phase 0
+
+| # | Blocker | Impact |
+|---|---|---|
+| 1 | `FunctionNode` exists only in `build/`, not in the live tree | `FunctionToolProvider` (Phase 2) has no substrate |
+| 2 | `build/` is committed and diverges from `rh_cognitv/` | Two sources of truth; a model asked to "port from build/lib" may resurrect stale code |
+| 3 | `rh_cognitv/agents/` exists but is empty (only `__pycache__`) | Ambiguous target package; the spec places the harness in `rh_cognitv/harness/` |
+| 4 | 8 integration tests **fail** (not skip) — they gate on `OPENAI_API_KEY` but not on the `openai` SDK being installed | No green baseline, so "did my change break anything?" is unanswerable |
+| 5 | No linter or type-checker installed despite a `[tool.ruff]` config | The review gate in §7 has nothing to enforce against |
+| 6 | No `Tokenizer` default and no tokenizer dependency | `TokenBudget` (Phase 3) needs one; resolved by shipping a heuristic default and making `tiktoken` an optional adapter |
+
+### Open items that are decisions, not blockers
+
+- **Packaging extras.** `[harness-sql]`, `[harness-redis]`, `[harness-s3]`, `[harness-mcp]` are named in §3 but not yet in `pyproject.toml`. Only needed from Phase 7; add them when the adapters land.
+- **`py.typed` coverage.** `[tool.setuptools.package-data]` lists each subpackage explicitly, so every new harness subpackage must be added there or it ships untyped.
+- **CI.** No workflow exists. Without one, the §7 review gate is manual.
+
+### Verdict
+
+**Ready to start Phase 0 immediately, and Phase 1 as soon as Phase 0's exit criteria are met.**
+
+Phases 0–5 are fully specified, require no new runtime dependency, and depend on nothing external. The only true prerequisite is a green test baseline. Phases 6–8 remain gated on the signals stated in §7 and should not be started early.
+
+**Recommended first three actions:**
+
+1. Run Phase 0 (GPT-Luna, with the `AgentPersona` packaging decision to Sonnet 5).
+2. Opus 5 writes Phase 1's ports and `state.py` in a single pass — no splitting, no delegation of the contract.
+3. Only then parallelize: Sonnet 5 on errors/events, GPT-Luna on in-memory adapters and round-trip tests.
+
+---
+
+## 10. Relationship to future.md
 
 Items from [future.md](./future.md) that this spec supersedes or advances:
 
@@ -983,11 +1102,11 @@ Items from [future.md](./future.md) that this spec supersedes or advances:
 |---|---|
 | #1 EventBus & Observability | **Advanced** — `EventBus` lands in Phase 1; persisted `EventSink` in Phase 7 (SG-06). |
 | #2 Runtime / Execution Engine | **Partially superseded** — the harness provides step-level orchestration, budgets, and stop policies. A generic retry runtime remains separate and complementary; `retryable` on `LLMError` is the shared contract. |
-| #3 FunctionNodes | **Advanced** — re-landed in Phase 1 as the substrate for `FunctionToolProvider`. |
-| #4 FlowNodes | **Partially superseded** — `ForEach` / `Map` / `Reduce` / `Sequence` land in Phase 5 as `WorkflowSpec`. Full DAG support remains deferred (DD-17). |
+| #3 FunctionNodes | **Advanced** — re-landed in Phase 0 as the substrate for `FunctionToolProvider`. |
+| #4 FlowNodes | **Partially superseded** — `ForEach` / `Map` / `Reduce` / `Sequence` land in Phase 5 as `WorkflowSpec`. Full DAG support remains deferred (DF-08). |
 | #5 Agent Loops | **Superseded** — this spec. |
 | #6 Memory / Context Management | **Superseded** — DD-14, DD-15, Phase 3. |
-| #7 Multi-Modal Inputs | **Still deferred** — requires the `Message.content` change noted in future.md. `ArtifactStore` and `BlobStore` are the intended carriers when it lands. |
-| #9 Anthropic Adapter | **Still deferred** — orthogonal to this spec; the harness is provider-agnostic by construction. |
+| #7 Multi-Modal Inputs | **Still deferred** — DF-12. |
+| #9 Anthropic Adapter | **Still deferred** — DF-13; orthogonal to this spec, since the harness is provider-agnostic by construction. |
 
-New deferrals introduced here: workflow conditionals and DAGs (DD-17), event-sourced state (DD-13), migration registry (DD-25), and the learned-compaction context strategies implied by DD-15.
+New deferrals introduced by this spec are catalogued in [§8](#8-deferred-to-later-versions) as DF-01 … DF-11.
