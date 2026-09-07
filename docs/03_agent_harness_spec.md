@@ -822,6 +822,14 @@ Each deliverable is rated so implementation can be routed to the cheapest model 
 
 Phase-level rating is the maximum of its items.
 
+**A phase is not a pool of tasks models pick from — it is a sequence of stages with a hard handoff.** Within a phase:
+
+- **Stage 1 (contract).** One model, one pass, produces the interfaces/models everything else in the phase imports: ABCs, Pydantic models, signatures, docstrings, the test table. Nothing in Stage 2 starts before Stage 1 is merged and reviewed.
+- **Stage 2 (implementation against the contract).** Items here import only what Stage 1 produced, not each other. They are mutually independent by construction — this is the *only* point where different models can genuinely work in parallel, because none of them can break another's inputs.
+- **Stage 3 (mechanical).** Tests, fixtures, and adapters that exercise a specific Stage 2 item. Each Stage 3 item depends on the one Stage 2 item it tests, not on the whole phase — start it as soon as that item lands.
+
+So within a phase you get real parallelism only inside Stage 2, and only across items that don't reference each other's output. Every phase table below is ordered by stage and states what each row depends on.
+
 ### Phase 0 — Pre-flight (unblocks Phase 1)
 
 **Goal:** Clear the concrete blockers identified in [§9](#9-development-readiness) so Phase 1 starts on a green tree.
@@ -845,16 +853,18 @@ Phase-level rating is the maximum of its items.
 
 **Deliverables:**
 
-| Deliverable | Complexity | Model |
-|---|---|---|
-| `harness/ports/*` — `SessionStore` (optimistic concurrency), `MemoryStore`, `ArtifactStore`, `BlobStore`, `ToolProvider`, `Tokenizer`, `LockProvider`, `Clock`, `IdGenerator`, `VectorIndex` (declared, unimplemented) | **C4** | Opus 5 |
-| `harness/state.py` — `SessionState`, `Step`, `TodoList`, `Plan`, `RunStatus`, `StepUsage`, all with `schema_version` (DD-25) and cost fields (SG-07) | **C4** | Opus 5 |
-| `harness/errors.py` — the taxonomy above, extending `LLMError` | C2 | Sonnet 5 |
-| `harness/events.py` — `AgentEvent` discriminated union, ported and extended from the `build/lib` prototype | C2 | Sonnet 5 |
-| `Redactor` seam declared (no-op default) before any persistence lands (SG-14) | C2 | Sonnet 5 |
-| Default `Tokenizer` — heuristic estimator, **no new dependency**; `tiktoken`-backed variant is an optional adapter | C2 | Sonnet 5 |
-| `harness_adapters/memory_backend.py` — in-memory implementations of every port | C1 | GPT-Luna |
-| Serialization round-trip and ABC-conformance tests | C1 | GPT-Luna |
+| Stage | Deliverable | Complexity | Model |
+|---|---|---|---|
+| 1 | `harness/ports/*` — `SessionStore` (optimistic concurrency), `MemoryStore`, `ArtifactStore`, `BlobStore`, `ToolProvider`, `Tokenizer`, `LockProvider`, `Clock`, `IdGenerator`, `VectorIndex` (declared, unimplemented) | **C4** | Opus 5 |
+| 1 | `harness/state.py` — `SessionState`, `Step`, `TodoList`, `Plan`, `RunStatus`, `StepUsage`, all with `schema_version` (DD-25) and cost fields (SG-07) | **C4** | Opus 5 |
+| 2 | `harness/errors.py` — the taxonomy above, extending `LLMError` | C2 | Sonnet 5 |
+| 2 | `harness/events.py` — `AgentEvent` discriminated union, ported and extended from the `build/lib` prototype | C2 | Sonnet 5 |
+| 2 | `Redactor` seam declared (no-op default) before any persistence lands (SG-14) | C2 | Sonnet 5 |
+| 2 | Default `Tokenizer` — heuristic estimator, **no new dependency**; `tiktoken`-backed variant is an optional adapter | C2 | Sonnet 5 |
+| 3 | `harness_adapters/memory_backend.py` — in-memory implementations of every port | C1 | GPT-Luna |
+| 3 | Serialization round-trip and ABC-conformance tests | C1 | GPT-Luna |
+
+**Dependencies:** both Stage 1 items must land together (they reference each other: `Step`/`SessionState` fields are typed against the port signatures) — treat them as one Opus 5 pass, not two. All four Stage 2 items only need Stage 1's port/state signatures and are independent of each other; they can go to Sonnet 5 in parallel or in one batch. Stage 3 needs every Stage 1 port signature (it implements all of them) and at least one Stage 2 model (`SessionState`/`AgentEvent`) to write round-trip tests against — so it is the last stage to start, not a parallel one.
 
 **Tests:** Round-trip serialization of every persisted model; `schema_version` mismatch raises `SchemaVersionError`; optimistic-concurrency conflict on `SessionStore.save()`; in-memory adapters satisfy their ABCs.
 
@@ -870,19 +880,21 @@ Phase-level rating is the maximum of its items.
 
 **Deliverables:**
 
-| Deliverable | Complexity | Model |
-|---|---|---|
-| `harness/loop.py` — `AgentLoop.step()` state machine, `StepOutcome`, `AgentConfig` (DD-13, DD-22) | **C4** | Opus 5 |
-| `ReasoningMode` resolution + unified `ReasoningResult` over stream/structured paths (DD-23) | C3 | Opus 5 |
-| `harness/tools/registry.py` + `spec.py` — dotted identity, reserved `internal.` prefix, collision rules, `ToolFilter` (DD-16) | C3 | Opus 5 |
-| `OpenAIAdapter` tool-name codec (`.` ⇄ `__`) with round-trip tests (DD-16) — a change to shipped code | C2 | Sonnet 5 |
-| `harness/policy.py` — `MaxStepsPolicy`, `FinishToolPolicy`, `NoProgressPolicy` (DD-21) | C2 | Sonnet 5 |
-| `harness/tools/cognitive.py` — always-on core: `internal.memory.write`, `internal.todo.update`, `internal.finish` (DD-24) | C2 | Sonnet 5 |
-| `harness/context/assembler.py` — first `ContextAssembler`: state header + bounded raw window (DD-15) | C3 | Sonnet 5 + Opus 5 review |
-| `EventSink` port and per-step usage aggregation (SG-06, SG-07) | C2 | Sonnet 5 |
-| `LocalDriver` and the `run()` convenience wrapper | C1 | GPT-Luna |
-| `FunctionToolProvider` wrapping `FunctionNode` instances | C1 | GPT-Luna |
-| Fake adapter scripting multi-step tool-call sequences + tests | C1 | GPT-Luna |
+| Stage | Deliverable | Complexity | Model |
+|---|---|---|---|
+| 1 | `harness/loop.py` — `AgentLoop.step()` state machine, `StepOutcome`, `AgentConfig` (DD-13, DD-22) | **C4** | Opus 5 |
+| 1 | `harness/tools/registry.py` + `spec.py` — dotted identity, reserved `internal.` prefix, collision rules, `ToolFilter` (DD-16) | C3 | Opus 5 |
+| 2 | `ReasoningMode` resolution + unified `ReasoningResult` over stream/structured paths (DD-23) | C3 | Opus 5 |
+| 2 | `harness/policy.py` — `MaxStepsPolicy`, `FinishToolPolicy`, `NoProgressPolicy` (DD-21) | C2 | Sonnet 5 |
+| 2 | `harness/tools/cognitive.py` — always-on core: `internal.memory.write`, `internal.todo.update`, `internal.finish` (DD-24) | C2 | Sonnet 5 |
+| 2 | `harness/context/assembler.py` — first `ContextAssembler`: state header + bounded raw window (DD-15) | C3 | Sonnet 5 + Opus 5 review |
+| 2 | `EventSink` port and per-step usage aggregation (SG-06, SG-07) | C2 | Sonnet 5 |
+| 2 | `OpenAIAdapter` tool-name codec (`.` ⇄ `__`) with round-trip tests (DD-16) — a change to shipped code | C2 | Sonnet 5 |
+| 3 | `LocalDriver` and the `run()` convenience wrapper | C1 | GPT-Luna |
+| 3 | `FunctionToolProvider` wrapping `FunctionNode` instances | C1 | GPT-Luna |
+| 3 | Fake adapter scripting multi-step tool-call sequences + tests | C1 | GPT-Luna |
+
+**Dependencies:** the two Stage 1 items are the phase's real contract (the loop's state machine and the tool registry it dispatches against) and must land as one Opus 5 pass before anything else starts. The six Stage 2 items each consume that contract but not each other's output — `ReasoningMode` doesn't need `policy.py`, the codec doesn't need `cognitive.py` — so they run in parallel across Sonnet 5 (and Opus 5 for the two C3 items) once Stage 1 is reviewed. Stage 3 needs a working loop *and* at least the cognitive-tool core and `FunctionToolProvider`'s target (`FunctionNode`, already landed in Phase 0) — start it once the specific Stage 2 item it exercises is done, not after the whole phase.
 
 **Tests:** Fake adapter scripting multi-step tool-call sequences; state persisted and reloaded between steps; each stop policy fires correctly; `NoProgressPolicy` halts a deliberately stuck loop; tool-name collisions resolve deterministically; registering under `internal.` raises `ToolNamespaceError`.
 
@@ -898,14 +910,16 @@ Phase-level rating is the maximum of its items.
 
 **Deliverables:**
 
-| Deliverable | Complexity | Model |
-|---|---|---|
-| `harness/context/budget.py` — `TokenBudget` with the State > Decisions > Facts > Observations eviction order, and compaction-on-eviction into `MemoryService` (DD-15) | **C4** | Opus 5 |
-| `harness/memory/policy.py` + `service.py` — retention, promotion (observation → fact), recall | C3 | Opus 5 |
-| `harness/memory/models.py` — `MemoryRecord`, `MemoryKind`, `MemoryScope`, `MemoryQuery` (DD-14) | C2 | Sonnet 5 |
-| Tool-result truncation with artifact spillover (SG-08) | C2 | Sonnet 5 |
-| Cognitive tools: `internal.memory.read`, `internal.memory.promote`, `internal.notes.append` | C1 | GPT-Luna |
-| `ContextAssembled` event with per-section token breakdown (SG-09); stable-prefix section ordering (SG-10) | C1 | GPT-Luna |
+| Stage | Deliverable | Complexity | Model |
+|---|---|---|---|
+| 1 | `harness/memory/models.py` — `MemoryRecord`, `MemoryKind`, `MemoryScope`, `MemoryQuery` (DD-14) | C2 | Sonnet 5 |
+| 2 | `harness/context/budget.py` — `TokenBudget` with the State > Decisions > Facts > Observations eviction order, and compaction-on-eviction into `MemoryService` (DD-15) | **C4** | Opus 5 |
+| 2 | `harness/memory/policy.py` + `service.py` — retention, promotion (observation → fact), recall | C3 | Opus 5 |
+| 3 | Tool-result truncation with artifact spillover (SG-08) | C2 | Sonnet 5 |
+| 3 | Cognitive tools: `internal.memory.read`, `internal.memory.promote`, `internal.notes.append` | C1 | GPT-Luna |
+| 3 | `ContextAssembled` event with per-section token breakdown (SG-09); stable-prefix section ordering (SG-10) | C1 | GPT-Luna |
+
+**Dependencies:** `MemoryRecord`/`MemoryKind`/`MemoryScope` (Stage 1) is the type every later item imports, so it goes first even though it's only C2 — it just happens to be simple *and* blocking. `budget.py` and `memory/policy.py` (Stage 2) both consume Stage 1's types but not each other's code directly, though they must agree on eviction semantics — treat them as one Opus 5 pass rather than two independent ones, since a mismatch here is exactly the "plausible-but-wrong" failure mode called out below. Stage 3 items each depend on a specific Stage 2 piece (spillover needs `budget.py`'s truncation hook; the debug event needs the assembler from Phase 2 plus `budget.py`) and are independent of each other.
 
 **Tests:** Observation eviction respects `max_active_observations` while decisions survive; budget overflow evicts in priority order; evicted content is recoverable from memory; a large tool result spills to an artifact and leaves a working reference.
 
@@ -921,14 +935,16 @@ Phase-level rating is the maximum of its items.
 
 **Deliverables:**
 
-| Deliverable | Complexity | Model |
-|---|---|---|
-| `harness/workflow/subagent.py` — `SubagentRunner`, `SubagentResult`, context isolation, depth capping, budget inheritance (DD-20) | C3 | Opus 5 |
-| Parallel tool execution under `asyncio.TaskGroup` with `max_parallel_tools`, result ordering, and cancellation semantics (SG-13) | C3 | Opus 5 |
-| Idempotency keys on tool invocations (SG-11) | C2 | Sonnet 5 |
-| `subagent.spawn` tool with an explicit brief and a restricted tool subset | C2 | Sonnet 5 |
-| `harness_adapters/filesystem.py` — local session / artifact / blob store | C1 | GPT-Luna |
-| Cognitive tools: `internal.artifact.write`, `internal.artifact.read`, `internal.artifact.list` | C1 | GPT-Luna |
+| Stage | Deliverable | Complexity | Model |
+|---|---|---|---|
+| 1 | `harness/workflow/subagent.py` — `SubagentRunner`, `SubagentResult`, context isolation, depth capping, budget inheritance (DD-20) | C3 | Opus 5 |
+| 2 | Parallel tool execution under `asyncio.TaskGroup` with `max_parallel_tools`, result ordering, and cancellation semantics (SG-13) | C3 | Opus 5 |
+| 2 | Idempotency keys on tool invocations (SG-11) | C2 | Sonnet 5 |
+| 2 | `harness_adapters/filesystem.py` — local session / artifact / blob store | C1 | GPT-Luna |
+| 3 | `subagent.spawn` tool with an explicit brief and a restricted tool subset | C2 | Sonnet 5 |
+| 3 | Cognitive tools: `internal.artifact.write`, `internal.artifact.read`, `internal.artifact.list` | C1 | GPT-Luna |
+
+**Dependencies:** `SubagentRunner` (Stage 1) fixes the isolation contract the spawn tool wraps, so it goes first. Parallel tool dispatch, idempotency keys, and the filesystem store (Stage 2) don't depend on `SubagentRunner` or on each other — they can run alongside Stage 1, not strictly after it, so this phase has two independent tracks rather than a single line. Stage 3 needs its specific Stage 1/2 counterpart: `subagent.spawn` needs `SubagentRunner`; the artifact tools need the filesystem store.
 
 **Tests:** Subagent context is isolated (parent window unchanged apart from the single summary observation); depth cap enforced; child budget deducted from parent; parallel tool results preserve call order; repeated invocation with the same idempotency key executes once.
 
@@ -944,13 +960,15 @@ Phase-level rating is the maximum of its items.
 
 **Deliverables:**
 
-| Deliverable | Complexity | Model |
-|---|---|---|
-| `harness/workflow/engine.py` — `Sequence`, `ForEach` (with `max_concurrency`), `Map`, `Reduce`, plus per-item checkpointing into `SessionState` so a mid-workflow crash resumes at the next unprocessed item | **C4** | Opus 5 |
-| Per-item workers pinned to `LLMStructuredNode` against `output_schema` (DD-23) | C2 | Sonnet 5 |
-| `harness/workflow/models.py` — `WorkflowSpec`, `StepSpec`, `ForEachSpec`, `WorkflowResult` (DD-17) | C2 | Sonnet 5 |
-| `internal.workflow.run` cognitive tool, exposed conditionally (DD-24) | C1 | GPT-Luna |
-| Per-item results written to `ArtifactStore`; manifest artifact returned to the parent | C1 | GPT-Luna |
+| Stage | Deliverable | Complexity | Model |
+|---|---|---|---|
+| 1 | `harness/workflow/models.py` — `WorkflowSpec`, `StepSpec`, `ForEachSpec`, `WorkflowResult` (DD-17) | C2 | Sonnet 5 |
+| 2 | `harness/workflow/engine.py` — `Sequence`, `ForEach` (with `max_concurrency`), `Map`, `Reduce`, plus per-item checkpointing into `SessionState` so a mid-workflow crash resumes at the next unprocessed item | **C4** | Opus 5 |
+| 3 | Per-item workers pinned to `LLMStructuredNode` against `output_schema` (DD-23) | C2 | Sonnet 5 |
+| 3 | `internal.workflow.run` cognitive tool, exposed conditionally (DD-24) | C1 | GPT-Luna |
+| 3 | Per-item results written to `ArtifactStore`; manifest artifact returned to the parent | C1 | GPT-Luna |
+
+**Dependencies:** `WorkflowSpec` (Stage 1) is data-only and simple, but the engine (Stage 2) is defined in terms of it, so it must land first. The engine's checkpoint contract is the phase's real risk, and every Stage 3 item plugs into a specific engine hook (the worker call, the tool entry point, the artifact-write path) — none of them can be written, let alone tested, before Stage 2 exists, so this phase is the most strictly sequential one in the plan.
 
 **Tests:** `ForEach` over 100 fake items respects `max_concurrency`; per-item failures are isolated under `continue_on_error`; a crash at item 50 resumes at item 50, not item 0; outputs validate against `output_schema`.
 
@@ -966,14 +984,16 @@ Phase-level rating is the maximum of its items.
 
 **Deliverables:**
 
-| Deliverable | Complexity | Model |
-|---|---|---|
-| `AgentLoop.resume(session_id, resumption)` and the suspend path through `StepOutcome` | C3 | Opus 5 |
-| Approval gating via `HarnessTool.requires_approval`, reusing the same suspend/resume path | C2 | Sonnet 5 |
-| `harness/interrupt.py` — `InterruptRequest`, `Resumption` (DD-18) | C2 | Sonnet 5 |
-| `internal.human.ask` and `internal.agent.ask` tools | C1 | GPT-Luna |
-| `InteractiveResponder` adapter for synchronous CLI use | C1 | GPT-Luna |
-| Timeout handling driven by the caller's scheduler (documented contract, no scheduler shipped) | C1 | GPT-Luna |
+| Stage | Deliverable | Complexity | Model |
+|---|---|---|---|
+| 1 | `harness/interrupt.py` — `InterruptRequest`, `Resumption` (DD-18) | C2 | Sonnet 5 |
+| 2 | `AgentLoop.resume(session_id, resumption)` and the suspend path through `StepOutcome` | C3 | Opus 5 |
+| 3 | Approval gating via `HarnessTool.requires_approval`, reusing the same suspend/resume path | C2 | Sonnet 5 |
+| 3 | `internal.human.ask` and `internal.agent.ask` tools | C1 | GPT-Luna |
+| 3 | `InteractiveResponder` adapter for synchronous CLI use | C1 | GPT-Luna |
+| 3 | Timeout handling driven by the caller's scheduler (documented contract, no scheduler shipped) | C1 | GPT-Luna |
+
+**Dependencies:** the interrupt/resumption models (Stage 1) are simple but must exist before `resume()` (Stage 2) can be typed. Everything in Stage 3 wraps `resume()` for a specific caller (approval, human, CLI, scheduler) and can be split across models in parallel once Stage 2 lands.
 
 **Exit criteria:** An agent suspends on a clarification, the process exits entirely, and a new process resumes it from persisted state with the answer injected.
 
@@ -987,15 +1007,17 @@ Phase-level rating is the maximum of its items.
 
 **Deliverables:**
 
-| Deliverable | Complexity | Model |
-|---|---|---|
-| `QueueDriver` reference implementation and the documented continuation contract (DD-22) | C3 | Opus 5 |
-| `harness_adapters/sqlalchemy_backend.py` — session + memory + artifact-metadata stores `[harness-sql]` | C3 | Opus 5 |
-| Migration registry activated if a schema change has landed (DD-25) | C3 | Opus 5 |
-| `harness_adapters/redis_backend.py` — session store and `LockProvider` `[harness-redis]` | C2 | Sonnet 5 |
-| `Redactor` implementation applied before persistence and emission (SG-14) | C2 | Sonnet 5 |
-| `harness_adapters/s3_backend.py` — `BlobStore` `[harness-s3]` | C1 | GPT-Luna |
-| Persisted event trail behind the existing `EventSink` port (SG-06) | C1 | GPT-Luna |
+| Stage | Deliverable | Complexity | Model |
+|---|---|---|---|
+| 1 | `QueueDriver` reference implementation and the documented continuation contract (DD-22) | C3 | Opus 5 |
+| 2 | `harness_adapters/sqlalchemy_backend.py` — session + memory + artifact-metadata stores `[harness-sql]` | C3 | Opus 5 |
+| 2 | `harness_adapters/redis_backend.py` — session store and `LockProvider` `[harness-redis]` | C2 | Sonnet 5 |
+| 2 | `harness_adapters/s3_backend.py` — `BlobStore` `[harness-s3]` | C1 | GPT-Luna |
+| 2 | `Redactor` implementation applied before persistence and emission (SG-14) | C2 | Sonnet 5 |
+| 2 | Persisted event trail behind the existing `EventSink` port (SG-06) | C1 | GPT-Luna |
+| 3 | Migration registry activated if a schema change has landed (DD-25) | C3 | Opus 5 |
+
+**Dependencies:** the continuation contract (Stage 1) is what every backend adapter must honour for correct at-least-once resume semantics, so it goes first. The five Stage 2 adapters/seams each implement one existing port against one real backend and don't depend on each other — genuinely parallel across all three models. The migration registry (Stage 3) only activates once a real schema change exists, which by definition can't happen before the Stage 2 backends are in use.
 
 **Exit criteria:** A single session is stepped by two different worker processes without state loss or lock contention.
 
@@ -1009,12 +1031,14 @@ Phase-level rating is the maximum of its items.
 
 **Deliverables:**
 
-| Deliverable | Complexity | Model |
-|---|---|---|
-| `VectorIndex` implementation and embedding-backed `MemoryQuery.text` recall, using the existing `LLMEmbeddingNode` | C3 | Opus 5 |
-| Trace recording adapter and replay-based regression suite (SG-12) | C3 | Opus 5 |
-| `harness_adapters/mcp_provider.py` — MCP `ToolProvider` with dynamic discovery `[harness-mcp]` | C2 | Sonnet 5 |
-| `PricingTable` (caller-supplied) and cost reporting (SG-07) | C1 | GPT-Luna |
+| Stage | Deliverable | Complexity | Model |
+|---|---|---|---|
+| 1 | `VectorIndex` implementation and embedding-backed `MemoryQuery.text` recall, using the existing `LLMEmbeddingNode` | C3 | Opus 5 |
+| 1 | Trace recording adapter and replay-based regression suite (SG-12) | C3 | Opus 5 |
+| 1 | `harness_adapters/mcp_provider.py` — MCP `ToolProvider` with dynamic discovery `[harness-mcp]` | C2 | Sonnet 5 |
+| 2 | `PricingTable` (caller-supplied) and cost reporting (SG-07) | C1 | GPT-Luna |
+
+**Dependencies:** the three Stage 1 items are unrelated ports/adapters (`VectorIndex`, trace recorder, MCP provider) with no dependency on each other — this phase's three items are effectively three independent, gated mini-projects that happen to share a maturity phase, not a pipeline. `PricingTable` (Stage 2) only needs the `StepUsage`/`BudgetPolicy` fields already in place since Phase 1, so it can actually start earlier than this phase implies if a caller needs it sooner.
 
 **Exit criteria:** MCP tools are callable without any core change; semantic recall measurably beats keyword recall on a real corpus; a prompt change can be evaluated against recorded traces before merge.
 
