@@ -46,14 +46,13 @@ Cross-cutting principles, inherited and extended from the node layer:
 
 - **A real foundation already exists.** Canonical results, a `family`/`code`/`retryable` error taxonomy, discriminated-union stream events, `ToolDefinition` with Pydantic schemas, and tool-argument auto-validation (SG-05) are exactly the primitives an agent loop needs. Most harnesses bolt these on late and badly.
 - **Provider neutrality is already proven.** Two adapters (OpenAI, Gemini) implement the same four ABCs. The agent loop inherits multi-provider support for free.
-- **Prior art in-repo.** `build/lib/rh_cognitv/` contains an earlier `EventBus`, `ActiveContext`, `AgentOrchestrator`, and `FunctionNode` iteration. We know concretely what worked (event taxonomy, typed context records, tool-name prefixing) and what didn't (in-memory-only context, no persistence, orchestrator doing too much).
 - **A written cognitive model.** [02_agent_context](./02_agent_context) already defines the Observation → Fact → Decision → State lifecycle and a context budget policy. Most projects never write this down; we can encode it as types.
 - **Clean scope boundary.** The harness is a library, not a product. It does not need a UI, a scheduler, or a control plane to be valuable.
 
 ### Weaknesses
 
 - **No persistence layer exists at all.** Everything to date is in-process. Sessions, memory, and artifacts are entirely greenfield, and getting the storage seams wrong is expensive to undo.
-- **No `FunctionNode` in the live tree.** Tool execution has no canonical node type yet; it must be re-landed in Phase 0 before the harness can be built.
+- **No `FunctionNode` in the live tree.** Tool execution has no canonical node type yet; it must be implemented in Phase 0 before the harness can be built.
 - **No green test baseline.** Provider integration tests currently fail rather than skip when the SDKs are absent (see [§9](#9-development-readiness)).
 - **Single-maintainer surface area.** This spec describes a system roughly 5× the size of the node layer. Phasing is not optional.
 - **The context assembler is the hardest component** and the least specifiable up front. Truncation, summarization, and relevance are empirical; they need real traces to tune.
@@ -83,7 +82,7 @@ Cross-cutting principles, inherited and extended from the node layer:
 rh_cognitv/
 ├── nodes/                              # EXISTING (spec 01) — unchanged
 │   ├── base.py                         # BaseNode
-│   ├── function_node.py                # (re-land) FunctionNode
+│   ├── function_node.py                # NEW — FunctionNode (Phase 0)
 │   ├── llm/                            # LLMText/Stream/Structured/Embedding nodes
 │   └── llm_adapters/                   # OpenAI, Gemini
 │
@@ -834,14 +833,15 @@ So within a phase you get real parallelism only inside Stage 2, and only across 
 
 **Goal:** Clear the concrete blockers identified in [§9](#9-development-readiness) so Phase 1 starts on a green tree.
 
-| Deliverable | Complexity | Model |
-|---|---|---|
-| Re-land `nodes/function_node.py` + `FunctionResult` from `build/lib` into the live tree, with tests | C1 | GPT-Luna |
-| Remove the stale `build/` tree from the repo and add it to `.gitignore` (it is a second, divergent source of truth today) | C1 | GPT-Luna |
-| Remove the empty `rh_cognitv/agents/` package — the harness lives in `rh_cognitv/harness/` | C1 | GPT-Luna |
-| Gate provider integration tests on **SDK availability** as well as API key (they currently fail, not skip, when `openai` is absent) | C1 | GPT-Luna |
-| Add `ruff` + `mypy` to `requirements_dev.txt` — a `ruff` config exists with no linter installed | C1 | GPT-Luna |
-| Decide and document where the [02_agent_context](./02_agent_context) prompt ships (package resource vs. default `AgentPersona` text) | C2 | Sonnet 5 |
+| Stage | Deliverable | Complexity | Model |
+|---|---|---|---|
+| 1 | Decide and document where the [02_agent_context](./02_agent_context) prompt ships (package resource vs. default `AgentPersona` text) | C2 | Sonnet 5 |
+| 2 | Implement `nodes/function_node.py` — `FunctionNode`, `FunctionResult` (DD-08/DD-12 style: wraps a sync/async callable, `validate_call`-based arg validation, canonical result), with tests | C1 | GPT-Luna |
+| 2 | Remove the empty `rh_cognitv/agents/` package — the harness lives in `rh_cognitv/harness/` | C1 | GPT-Luna |
+| 2 | Gate provider integration tests on **SDK availability** as well as API key (they currently fail, not skip, when `openai` is absent) | C1 | GPT-Luna |
+| 2 | Add `ruff` + `mypy` to `requirements_dev.txt` — a `ruff` config exists with no linter installed | C1 | GPT-Luna |
+
+**Dependencies:** the Stage 1 item is a documentation decision with no code dependency on anything else — it can run before or alongside Stage 2. All four Stage 2 items are independent of each other (different files, no shared interface) and can be handed to GPT-Luna in parallel, or batched as one pass.
 
 **Exit criteria:** `pytest -q` is fully green with no provider SDKs installed; `FunctionNode` is importable from `rh_cognitv.nodes`; `ruff check` and `mypy` run clean on the live tree.
 
@@ -858,7 +858,7 @@ So within a phase you get real parallelism only inside Stage 2, and only across 
 | 1 | `harness/ports/*` — `SessionStore` (optimistic concurrency), `MemoryStore`, `ArtifactStore`, `BlobStore`, `ToolProvider`, `Tokenizer`, `LockProvider`, `Clock`, `IdGenerator`, `VectorIndex` (declared, unimplemented) | **C4** | Opus 5 |
 | 1 | `harness/state.py` — `SessionState`, `Step`, `TodoList`, `Plan`, `RunStatus`, `StepUsage`, all with `schema_version` (DD-25) and cost fields (SG-07) | **C4** | Opus 5 |
 | 2 | `harness/errors.py` — the taxonomy above, extending `LLMError` | C2 | Sonnet 5 |
-| 2 | `harness/events.py` — `AgentEvent` discriminated union, ported and extended from the `build/lib` prototype | C2 | Sonnet 5 |
+| 2 | `harness/events.py` — `AgentEvent` discriminated union (step lifecycle, tool-call, text-delta, error events) | C2 | Sonnet 5 |
 | 2 | `Redactor` seam declared (no-op default) before any persistence lands (SG-14) | C2 | Sonnet 5 |
 | 2 | Default `Tokenizer` — heuristic estimator, **no new dependency**; `tiktoken`-backed variant is an optional adapter | C2 | Sonnet 5 |
 | 3 | `harness_adapters/memory_backend.py` — in-memory implementations of every port | C1 | GPT-Luna |
@@ -1084,19 +1084,19 @@ Assessed against the live tree, not the spec.
 | Error taxonomy | `LLMError` with `family` / `code` / `retryable`; the harness taxonomy extends it rather than competing with it |
 | Test suite | 227 unit tests passing, fake-adapter pattern already established — the harness can be tested the same way |
 | Dependencies | `pydantic`, `jsonpatch`, `ulid-py`, `jsonschema` already declared; **Phases 0–5 need no new runtime dependency** |
-| Prior art | `build/lib/rh_cognitv/` holds a working `EventBus` (165 LOC), `ActiveContext` (214), `AgentOrchestrator` (465), `FunctionNode` (67) to port from |
 | Written cognitive model | [02_agent_context](./02_agent_context) (677 lines) defines the memory lifecycle and context budget the harness encodes as types |
+
+> Note: `build/` in the repository is an unrelated build artifact from another branch — not a source to port from, reference, or clean up as part of this spec.
 
 ### Blockers — all cleared by Phase 0
 
 | # | Blocker | Impact |
 |---|---|---|
-| 1 | `FunctionNode` exists only in `build/`, not in the live tree | `FunctionToolProvider` (Phase 2) has no substrate |
-| 2 | `build/` is committed and diverges from `rh_cognitv/` | Two sources of truth; a model asked to "port from build/lib" may resurrect stale code |
-| 3 | `rh_cognitv/agents/` exists but is empty (only `__pycache__`) | Ambiguous target package; the spec places the harness in `rh_cognitv/harness/` |
-| 4 | 8 integration tests **fail** (not skip) — they gate on `OPENAI_API_KEY` but not on the `openai` SDK being installed | No green baseline, so "did my change break anything?" is unanswerable |
-| 5 | No linter or type-checker installed despite a `[tool.ruff]` config | The review gate in §7 has nothing to enforce against |
-| 6 | No `Tokenizer` default and no tokenizer dependency | `TokenBudget` (Phase 3) needs one; resolved by shipping a heuristic default and making `tiktoken` an optional adapter |
+| 1 | `FunctionNode` does not exist anywhere in the live tree | `FunctionToolProvider` (Phase 2) has no substrate — must be implemented fresh in Phase 0 |
+| 2 | `rh_cognitv/agents/` exists but is empty (only `__pycache__`) | Ambiguous target package; the spec places the harness in `rh_cognitv/harness/` |
+| 3 | 8 integration tests **fail** (not skip) — they gate on `OPENAI_API_KEY` but not on the `openai` SDK being installed | No green baseline, so "did my change break anything?" is unanswerable |
+| 4 | No linter or type-checker installed despite a `[tool.ruff]` config | The review gate in §7 has nothing to enforce against |
+| 5 | No `Tokenizer` default and no tokenizer dependency | `TokenBudget` (Phase 3) needs one; resolved by shipping a heuristic default and making `tiktoken` an optional adapter |
 
 ### Open items that are decisions, not blockers
 
@@ -1126,7 +1126,7 @@ Items from [future.md](./future.md) that this spec supersedes or advances:
 |---|---|
 | #1 EventBus & Observability | **Advanced** — `EventBus` lands in Phase 1; persisted `EventSink` in Phase 7 (SG-06). |
 | #2 Runtime / Execution Engine | **Partially superseded** — the harness provides step-level orchestration, budgets, and stop policies. A generic retry runtime remains separate and complementary; `retryable` on `LLMError` is the shared contract. |
-| #3 FunctionNodes | **Advanced** — re-landed in Phase 0 as the substrate for `FunctionToolProvider`. |
+| #3 FunctionNodes | **Advanced** — implemented fresh in Phase 0 as the substrate for `FunctionToolProvider`. |
 | #4 FlowNodes | **Partially superseded** — `ForEach` / `Map` / `Reduce` / `Sequence` land in Phase 5 as `WorkflowSpec`. Full DAG support remains deferred (DF-08). |
 | #5 Agent Loops | **Superseded** — this spec. |
 | #6 Memory / Context Management | **Superseded** — DD-14, DD-15, Phase 3. |
